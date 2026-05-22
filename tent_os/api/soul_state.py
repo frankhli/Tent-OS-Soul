@@ -332,12 +332,13 @@ async def _handle_fast_chat_v2(
         pass
 
     # --- 1.6 定义流式回调（同步回调，内部用 create_task 发 WS）---
+    # FIX: 使用 send_to_session 替代 send_to(websocket)，避免断线重连后消息丢失
     def _on_chunk(text: str, chunk_type: str = "content"):
         nonlocal reply, reasoning_text
         if chunk_type == "reasoning":
             reasoning_text += text
             try:
-                asyncio.create_task(ws_manager.send_to(websocket, {
+                asyncio.create_task(ws_manager.send_to_session(session_id, {
                     "type": "chat.reasoning_chunk",
                     "payload": {"content": text, "session_id": session_id},
                 }))
@@ -346,7 +347,7 @@ async def _handle_fast_chat_v2(
         else:
             reply += text
             try:
-                asyncio.create_task(ws_manager.send_to(websocket, {
+                asyncio.create_task(ws_manager.send_to_session(session_id, {
                     "type": "chat.stream_chunk",
                     "payload": {"content": text, "session_id": session_id},
                 }))
@@ -355,7 +356,7 @@ async def _handle_fast_chat_v2(
 
     def _on_tool_call(tool_info: Dict):
         try:
-            asyncio.create_task(ws_manager.send_to(websocket, {
+            asyncio.create_task(ws_manager.send_to_session(session_id, {
                 "type": "chat.tool_call",
                 "payload": {
                     "session_id": session_id,
@@ -368,7 +369,7 @@ async def _handle_fast_chat_v2(
 
     def _on_tool_result(result_info: Dict):
         try:
-            asyncio.create_task(ws_manager.send_to(websocket, {
+            asyncio.create_task(ws_manager.send_to_session(session_id, {
                 "type": "chat.tool_result",
                 "payload": {
                     "session_id": session_id,
@@ -479,14 +480,14 @@ async def _handle_fast_chat_legacy(
                         nonlocal reasoning_text
                         reasoning_text += text
                         asyncio.create_task(
-                            ws_manager.send_to(websocket, {
+                            ws_manager.send_to_session(session_id, {
                                 "type": "chat.reasoning_chunk",
                                 "payload": {"content": text, "session_id": session_id},
                             })
                         )
                     else:
                         asyncio.create_task(
-                            ws_manager.send_to(websocket, {
+                            ws_manager.send_to_session(session_id, {
                                 "type": "chat.stream_chunk",
                                 "payload": {"content": text, "session_id": session_id},
                             })
@@ -499,7 +500,7 @@ async def _handle_fast_chat_legacy(
                 )
             else:
                 reply = await state._llm.chat(messages, temperature=0.7, max_tokens=4096)
-                await ws_manager.send_to(websocket, {
+                await ws_manager.send_to_session(session_id, {
                     "type": "chat.stream_chunk",
                     "payload": {"content": reply, "session_id": session_id},
                 })
@@ -513,7 +514,7 @@ async def _handle_fast_chat_legacy(
     # 发送完成
     elapsed_ms = int((time.time() - start_ts) * 1000)
     try:
-        await ws_manager.send_to(websocket, {
+        await ws_manager.send_to_session(session_id, {
             "type": "chat.completed",
             "payload": {
                 "content": reply,

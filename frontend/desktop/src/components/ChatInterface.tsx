@@ -156,7 +156,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  const micPressTimerRef = useRef<number>(0);
  const isLongPressRef = useRef(false);
 
- const {lastMessage, send, connectionStatus} = useWebSocket(`ws://${location.host}/ws`);
+ const {lastMessage, send, connectionStatus, reconnectCount} = useWebSocket(`ws://${location.host}/ws`);
 
  const showToast = useCallback((msg: string) => {
  setToastMsg(msg);

@@ -23,6 +23,7 @@ export function useWebSocket(url: string) {
   const [connected, setConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
+  const [reconnectCount, setReconnectCount] = useState(0);
   const sendQueueRef = useRef<QueuedMessage[]>([]);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -105,6 +106,7 @@ export function useWebSocket(url: string) {
           urlFallbackIndexRef.current = 0;
           setConnected(true);
           setConnectionStatus('connected');
+          setReconnectCount((c) => c + 1);
           console.log('[WS] connected');
           startHeartbeat();
           flushQueue();
@@ -195,5 +197,5 @@ export function useWebSocket(url: string) {
     }
   }, []);
 
-  return { connected, connectionStatus, lastMessage, send };
+  return { connected, connectionStatus, lastMessage, send, reconnectCount };
 }
