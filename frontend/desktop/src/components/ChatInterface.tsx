@@ -226,7 +226,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  const {type, payload} = lastMessage;
  if (type === 'chat.completed') {
  let completedMsgId: string | null = null;
- const content = payload.content || '';
+ const content = typeof payload.content === 'string' ? payload.content : String(payload.content ?? '');
  setMessages((prev) => {
  const idx = prev.findIndex((m) => m.isStreaming);
  if (idx >= 0) {
@@ -287,9 +287,10 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  const idx = prev.findIndex((m) => m.isStreaming);
  if (idx >= 0) {
  const updated = [...prev];
+ const chunkText = typeof payload.content === 'string' ? payload.content : (typeof payload.chunk === 'string' ? payload.chunk : '');
  updated[idx] = {
  ...updated[idx],
- content: updated[idx].content + (payload.content || payload.chunk || ''),
+ content: updated[idx].content + chunkText,
 };
  return updated;
 }
@@ -300,9 +301,10 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  const idx = prev.findIndex((m) => m.isStreaming);
  if (idx >= 0) {
  const updated = [...prev];
+ const chunkText = typeof payload.content === 'string' ? payload.content : (typeof payload.chunk === 'string' ? payload.chunk : '');
  updated[idx] = {
  ...updated[idx],
- reasoning: (updated[idx].reasoning || '') + (payload.content || payload.chunk || ''),
+ reasoning: (updated[idx].reasoning || '') + chunkText,
 };
  return updated;
 }
@@ -363,11 +365,12 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  const idx = prev.findIndex((m) => m.isStreaming);
  if (idx >= 0) {
  const updated = [...prev];
+ const toolArgs = typeof payload.arguments === 'string' ? payload.arguments : JSON.stringify(payload.arguments ?? {});
  updated[idx] = {
  ...updated[idx],
  toolCalls: [...(updated[idx].toolCalls || []), {
  tool: payload.tool || '',
- arguments: payload.arguments || '',
+ arguments: toolArgs,
  }],
  };
  return updated;
@@ -379,11 +382,12 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  const idx = prev.findIndex((m) => m.isStreaming);
  if (idx >= 0) {
  const updated = [...prev];
+ const toolRes = typeof payload.result === 'string' ? payload.result : JSON.stringify(payload.result ?? {});
  updated[idx] = {
  ...updated[idx],
  toolResults: [...(updated[idx].toolResults || []), {
  tool: payload.tool || '',
- result: payload.result || '',
+ result: toolRes,
  }],
  };
  return updated;
@@ -1166,7 +1170,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  {msg.toolCalls.map((tc, i) => (
  <div key={i} className="text-[11px] px-2 py-1 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
  <span className="font-medium">🔧 {tc.tool}</span>
- <span className="text-content-muted truncate">{tc.arguments}</span>
+ <span className="text-content-muted truncate">{typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments)}</span>
  </div>
  ))}
  </div>
@@ -1176,7 +1180,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  {msg.toolResults.map((tr, i) => (
  <div key={i} className="text-[11px] px-2 py-1 rounded bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/40 text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
  <span className="font-medium">✓ {tr.tool}</span>
- <span className="text-content-muted truncate">{tr.result}</span>
+ <span className="text-content-muted truncate">{typeof tr.result === 'string' ? tr.result : JSON.stringify(tr.result)}</span>
  </div>
  ))}
  </div>
@@ -1553,6 +1557,18 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  const target = e.target as HTMLTextAreaElement;
  target.style.height = 'auto';
  target.style.height = Math.min(target.scrollHeight, 120) + 'px';
+ }}
+ onPaste={(e) => {
+ // FIX: 阻止 macOS 微信复制的文件路径直接粘贴到输入框
+ const text = e.clipboardData.getData('text/plain');
+ if (text && text.includes('/Library/Containers/com.tencent.xinWeChat/')) {
+ e.preventDefault();
+ showToast('请直接拖放图片到聊天区域，不要从微信复制粘贴图片');
+ }
+ }}
+ onDrop={(e) => {
+ // FIX: 阻止拖放文件到 textarea 时插入文件路径文本
+ e.preventDefault();
  }}
  />
  {messages.some((m) => m.isStreaming) ? (

@@ -1032,7 +1032,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "timestamp": asyncio.get_event_loop().time(),
                     })
 
-                elif msg_type == "task.abort":
+                elif msg_type in ("chat.abort", "task.abort"):
                     session_id = payload.get("session_id")
                     # FIX: 实现真正的 abort 机制——设置 abort 标志，Tool Loop 检测到后优雅退出
                     try:
