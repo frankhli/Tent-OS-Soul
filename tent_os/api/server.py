@@ -107,8 +107,8 @@ async def _set_executor_mode(mode: str) -> bool:
     nats_ok = False
     try:
         # 优先使用 state 已有的 state_store（避免重复创建连接）
-        if state.state_store and hasattr(state.state_store, 'redis'):
-            await state.state_store.redis.set(EXECUTOR_MODE_KEY, mode)
+        if soul_state_ref.state.state_store and hasattr(soul_state_ref.state.state_store, 'redis'):
+            await soul_state_ref.state.state_store.redis.set(EXECUTOR_MODE_KEY, mode)
             redis_ok = True
         else:
             # fallback：尝试创建新连接
@@ -920,8 +920,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # FIX: 新消息开始时重置 abort 标志，避免上次中止污染本次对话
                     try:
-                        if state.state_store:
-                            await state.state_store.update(session_id, {"abort_requested": False})
+                        if soul_state_ref.state.state_store:
+                            await soul_state_ref.state.state_store.update(session_id, {"abort_requested": False})
                     except Exception:
                         pass
                     
@@ -969,7 +969,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 elif msg_type == "chat.session.list":
                     user_id = payload.get("user_id", "web_user")
-                    sessions = await state.state_store.list_sessions(user_id, limit=50)
+                    sessions = await soul_state_ref.state.state_store.list_sessions(user_id, limit=50)
                     # 过滤掉 heartbeat 内部会话，不显示在 UI
                     sessions = [
                         s for s in sessions
@@ -984,7 +984,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif msg_type == "chat.session.create":
                     session_id = f"ws_{uuid.uuid4().hex[:12]}"
                     user_id = payload.get("user_id", "web_user")
-                    await state.state_store.create(session_id=session_id, task="", user_id=user_id)
+                    await soul_state_ref.state.state_store.create(session_id=session_id, task="", user_id=user_id)
                     await ws_manager.send_to(websocket, {
                         "type": "chat.session.created",
                         "payload": {"session_id": session_id},
@@ -993,7 +993,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 elif msg_type == "chat.history":
                     session_id = payload.get("session_id")
-                    messages = await state.state_store.get_messages(session_id, limit=100)
+                    messages = await soul_state_ref.state.state_store.get_messages(session_id, limit=100)
                     await ws_manager.send_to(websocket, {
                         "type": "chat.history",
                         "payload": {"session_id": session_id, "messages": messages},
@@ -1003,9 +1003,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif msg_type == "chat.session.load":
                     session_id = payload.get("session_id")
                     user_id = payload.get("user_id", "web_user")
-                    if session_id and state.state_store:
+                    if session_id and soul_state_ref.state.state_store:
                         try:
-                            hist = await state.state_store.get_messages(session_id, limit=50)
+                            hist = await soul_state_ref.state.state_store.get_messages(session_id, limit=50)
                             await ws_manager.send_to(websocket, {
                                 "type": "chat.session.loaded",
                                 "payload": {
@@ -1046,8 +1046,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     session_id = payload.get("session_id")
                     # FIX: 实现真正的 abort 机制——设置 abort 标志，Tool Loop 检测到后优雅退出
                     try:
-                        if state.state_store:
-                            await state.state_store.update(session_id, {"abort_requested": True})
+                        if soul_state_ref.state.state_store:
+                            await soul_state_ref.state.state_store.update(session_id, {"abort_requested": True})
                         await ws_manager.send_to(websocket, {
                             "type": "chat.aborted",
                             "payload": {"session_id": session_id, "status": "aborting"},
@@ -1203,12 +1203,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     # FIX Phase 5: TTS 开启通知 → 存储到 state 供后端读取
                     user_id = payload.get("user_id", "web_user")
                     try:
-                        if state.state_store:
-                            sessions = await state.state_store.list_sessions(user_id, limit=1)
+                        if soul_state_ref.state.state_store:
+                            sessions = await soul_state_ref.state.state_store.list_sessions(user_id, limit=1)
                             if sessions:
                                 sid = sessions[0].get("session_id")
                                 if sid:
-                                    await state.state_store.update(sid, {"tts_enabled": True})
+                                    await soul_state_ref.state.state_store.update(sid, {"tts_enabled": True})
                                     logger.debug(f"[WS] TTS 已启用 [{sid}]")
                     except Exception as e:
                         logger.debug(f"[WS] TTS 启用处理失败: {e}")
@@ -1222,12 +1222,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     # FIX Phase 5: TTS 关闭通知
                     user_id = payload.get("user_id", "web_user")
                     try:
-                        if state.state_store:
-                            sessions = await state.state_store.list_sessions(user_id, limit=1)
+                        if soul_state_ref.state.state_store:
+                            sessions = await soul_state_ref.state.state_store.list_sessions(user_id, limit=1)
                             if sessions:
                                 sid = sessions[0].get("session_id")
                                 if sid:
-                                    await state.state_store.update(sid, {"tts_enabled": False})
+                                    await soul_state_ref.state.state_store.update(sid, {"tts_enabled": False})
                                     logger.debug(f"[WS] TTS 已禁用 [{sid}]")
                     except Exception as e:
                         logger.debug(f"[WS] TTS 禁用处理失败: {e}")
@@ -1242,12 +1242,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     user_id = payload.get("user_id", "web_user")
                     tts_enabled = payload.get("enabled", False)
                     try:
-                        if state.state_store:
-                            sessions = await state.state_store.list_sessions(user_id, limit=1)
+                        if soul_state_ref.state.state_store:
+                            sessions = await soul_state_ref.state.state_store.list_sessions(user_id, limit=1)
                             if sessions:
                                 sid = sessions[0].get("session_id")
                                 if sid:
-                                    await state.state_store.update(sid, {"tts_enabled": tts_enabled})
+                                    await soul_state_ref.state.state_store.update(sid, {"tts_enabled": tts_enabled})
                                     logger.debug(f"[WS] TTS 状态更新 [{sid}]: enabled={tts_enabled}")
                     except Exception as e:
                         logger.debug(f"[WS] TTS 状态更新失败: {e}")
@@ -1374,9 +1374,9 @@ async def websocket_endpoint(websocket: WebSocket):
 async def _get_health_payload() -> Dict:
     bus_connected = state.bus is not None and hasattr(state.bus.nats, "is_connected") and state.bus.nats.is_connected
     redis_connected = False
-    if state.state_store:
+    if soul_state_ref.state.state_store:
         try:
-            redis_connected = hasattr(state.state_store, "ping") and await state.state_store.ping()
+            redis_connected = hasattr(state.state_store, "ping") and await soul_state_ref.state.state_store.ping()
         except Exception:
             pass
     return {
@@ -2904,7 +2904,7 @@ async def ui_session_context(session_id: str):
         if not state.state_store:
             return {"error": "state_store not available"}
         
-        session_data = await state.state_store.load(session_id)
+        session_data = await soul_state_ref.state.state_store.load(session_id)
         ui_context = session_data.get("ui_context", {}) if session_data else {}
         
         # 补充任务状态
@@ -2982,7 +2982,7 @@ async def ui_memory_stats():
 async def ui_session_telemetry(session_id: str):
     """单Session实时Telemetry：token消耗、调用次数、执行状态"""
     try:
-        session_data = await state.state_store.load(session_id)
+        session_data = await soul_state_ref.state.state_store.load(session_id)
         ui_ctx = session_data.get("ui_context", {}) if session_data else {}
         return {
             "session_id": session_id,
@@ -3002,7 +3002,7 @@ async def ui_session_telemetry(session_id: str):
 async def ui_session_tools(session_id: str):
     """单Session工具执行链追踪"""
     try:
-        session_data = await state.state_store.load(session_id)
+        session_data = await soul_state_ref.state.state_store.load(session_id)
         logs = session_data.get("tool_execution_log", []) if session_data else []
         return {"session_id": session_id, "tools": logs, "count": len(logs)}
     except Exception as e:
@@ -3140,7 +3140,7 @@ async def ui_telemetry():
     
     # 1. 汇总所有会话的 ui_context（历史累计 + 今日过滤）
     try:
-        if state.state_store and hasattr(state.state_store, 'redis'):
+        if soul_state_ref.state.state_store and hasattr(soul_state_ref.state.state_store, 'redis'):
             redis = state.state_store.redis
             from datetime import datetime, timedelta
             today_start = (datetime.now() - timedelta(hours=24)).isoformat()
@@ -5083,7 +5083,7 @@ async def get_task_status(session_id: str):
 
     # 3. Fallback: state_store
     try:
-        s = await state.state_store.load(session_id)
+        s = await soul_state_ref.state.state_store.load(session_id)
         return TaskStatusResponse(
             session_id=session_id,
             status="processing",
@@ -5191,7 +5191,7 @@ async def session_feedback(session_id: str, req: FeedbackRequest):
 
     try:
         # 从 session store 获取 user_id
-        session_state = await state.state_store.load(session_id)
+        session_state = await soul_state_ref.state.state_store.load(session_id)
         user_id = session_state.get("user_id", "anonymous")
     except Exception:
         user_id = "anonymous"
