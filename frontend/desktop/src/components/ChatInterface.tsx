@@ -440,7 +440,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  // Auto-scroll to search result
  useEffect(() => {
  if (!showMessageSearch || !messageSearch) return;
- const matches = messages.filter((m) => m.content.toLowerCase().includes(messageSearch.toLowerCase()));
+ const matches = messages.filter((m) => (m.content || '').toLowerCase().includes(messageSearch.toLowerCase()));
  const target = matches[searchResultIndex];
  if (target) {
  const el = document.querySelector(`[data-msg-id="${target.id}"]`);
@@ -1022,13 +1022,13 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  <>
  <span className="text-[10px] text-content-muted tabular-nums">
  {(() => {
- const matches = messages.filter((m) => m.content.toLowerCase().includes(messageSearch.toLowerCase()));
+ const matches = messages.filter((m) => (m.content || '').toLowerCase().includes(messageSearch.toLowerCase()));
  return matches.length > 0 ? `${Math.min(searchResultIndex + 1, matches.length)} / ${matches.length}` : '0 / 0';
  })()}
  </span>
  <button
  onClick={() => {
- const matches = messages.filter((m) => m.content.toLowerCase().includes(messageSearch.toLowerCase()));
+ const matches = messages.filter((m) => (m.content || '').toLowerCase().includes(messageSearch.toLowerCase()));
  setSearchResultIndex((prev) => (prev > 0 ? prev - 1 : matches.length - 1));
  }}
  className="p-0.5 rounded hover:bg-surface-overlay text-content-muted"
@@ -1038,7 +1038,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  </button>
  <button
  onClick={() => {
- const matches = messages.filter((m) => m.content.toLowerCase().includes(messageSearch.toLowerCase()));
+ const matches = messages.filter((m) => (m.content || '').toLowerCase().includes(messageSearch.toLowerCase()));
  setSearchResultIndex((prev) => (prev < matches.length - 1 ? prev + 1 : 0));
  }}
  className="p-0.5 rounded hover:bg-surface-overlay text-content-muted"
@@ -1067,11 +1067,11 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  {/* Messages */}
  {(() => {
  const searchMatches = messageSearch
- ? messages.filter((m) => m.content.toLowerCase().includes(messageSearch.toLowerCase()))
+ ? messages.filter((m) => (m.content || '').toLowerCase().includes(messageSearch.toLowerCase()))
  : [];
  const activeMatchId = searchMatches[searchResultIndex]?.id;
  const lastAiMsgId = messages.filter((m) => m.role === 'assistant' && !m.isStreaming).slice(-1)[0]?.id;
- return messages.filter((msg) => !showMessageSearch || !messageSearch || msg.content.toLowerCase().includes(messageSearch.toLowerCase())).map((msg) => {
+ return messages.filter((msg) => !showMessageSearch || !messageSearch || (msg.content || '').toLowerCase().includes(messageSearch.toLowerCase())).map((msg) => {
  const isSearchMatch = activeMatchId === msg.id;
  const isLastAiMsg = msg.id === lastAiMsgId;
  return (
@@ -1079,7 +1079,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  {msg.role === 'system' ? (
  <div className={`bg-amber-500/10 border rounded-xl p-3 max-w-lg text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2 ${isSearchMatch ? 'ring-2 ring-accent' : 'border-amber-300/50 dark:border-amber-800'}`}>
  <AlertTriangle className="w-4 h-4 shrink-0" />
- {msg.content}
+ {msg.content || ''}
  </div>
  ) : (
  <div className={`max-w-xl ${msg.role === 'user' ? 'items-end' : 'items-start'} flex flex-col gap-1 relative group`}>
@@ -1157,7 +1157,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  </div>
  ) : (
  <div className="leading-relaxed">
- <MarkdownMessage content={msg.content} />
+ <MarkdownMessage content={msg.content || ''} />
  {msg.isStreaming && (
  <span className="inline-block w-0.5 h-4 ml-0.5 bg-accent animate-pulse align-middle" />
  )}
@@ -1218,7 +1218,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  <button
  onClick={() => {
  setEditingMessageId(msg.id);
- setEditDraft(msg.content);
+ setEditDraft(msg.content || '');
  }}
  className={`text-[10px] text-content-muted hover:text-accent transition ${editingMessageId !== msg.id ? 'opacity-0 group-hover:opacity-100' : ''}`}
  title="编辑"
@@ -1232,7 +1232,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  {settings.tts_enabled && (
  <>
  <button
- onClick={() => togglePlay(msg.id, msg.content)}
+ onClick={() => togglePlay(msg.id, msg.content || '')}
  className="text-[10px] text-content-muted hover:text-accent transition flex items-center gap-0.5"
  title={playingMsgId === msg.id ? '暂停' : '朗读'}
  >
@@ -1259,7 +1259,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
  </>
  )}
  <button
- onClick={() => navigator.clipboard.writeText(msg.content)}
+ onClick={() => navigator.clipboard.writeText(msg.content || '')}
  className="text-[10px] text-content-muted hover:text-accent transition opacity-0 group-hover:opacity-100"
  title="复制"
  >

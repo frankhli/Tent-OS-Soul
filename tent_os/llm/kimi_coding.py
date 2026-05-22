@@ -405,7 +405,9 @@ class KimiCodingLLM(LLMProvider):
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        if thinking is not None:
+        if thinking is None:
+            payload["thinking"] = {"type": "disabled"}
+        elif thinking is not None:
             payload["thinking"] = thinking
         
         full_text = ""

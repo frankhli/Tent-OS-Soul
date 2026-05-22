@@ -263,7 +263,7 @@ class RedisSessionStateStore(SessionStateStore):
             timestamp = datetime.now().isoformat()
             msg = {
                 "role": role,
-                "content": content,
+                "content": content or "",
                 "timestamp": timestamp
             }
             if images:

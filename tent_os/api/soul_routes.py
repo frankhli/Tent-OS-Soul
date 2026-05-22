@@ -174,8 +174,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "messages": [
                                         {
                                             "role": m.get("role", ""),
-                                            "content": m.get("content", ""),
-                                            "reasoning": m.get("reasoning", ""),
+                                            "content": m.get("content", "") or "",
+                                            "reasoning": m.get("reasoning", "") or "",
                                         }
                                         for m in hist if m.get("role")
                                     ],
