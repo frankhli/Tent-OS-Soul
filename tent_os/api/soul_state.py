@@ -273,6 +273,13 @@ async def _handle_fast_chat_v2(
     reasoning_text = ""
     conversation_for_cache = None
 
+    # --- 0.5 重置 abort 标志（避免上次中止污染本次对话）---
+    try:
+        if state.state_store:
+            await state.state_store.update(session_id, {"abort_requested": False})
+    except Exception:
+        pass
+
     # --- 1.1 构建 persona_hint ---
     persona_hint = ""
     if state.persona_profiler:

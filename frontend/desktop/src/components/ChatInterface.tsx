@@ -394,7 +394,7 @@ export default function ChatInterface({sessionId: propSessionId, onSessionCreate
 }
  return prev;
 });
-} else if (type === 'chat.aborted' || type === 'chat.error') {
+} else if (type === 'chat.aborted' || type === 'chat.error' || type === 'task.aborted') {
  // 中止或出错：停止动画
  setMessages((prev) => {
  const idx = prev.findIndex((m) => m.isStreaming);

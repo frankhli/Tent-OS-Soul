@@ -918,6 +918,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     # 关联 WebSocket 到 session（用于 session-scoped 消息推送）
                     await ws_manager.associate_session(websocket, session_id)
                     
+                    # FIX: 新消息开始时重置 abort 标志，避免上次中止污染本次对话
+                    try:
+                        if state.state_store:
+                            await state.state_store.update(session_id, {"abort_requested": False})
+                    except Exception:
+                        pass
+                    
                     state._pending_count[session_id] = state._pending_count.get(session_id, 0) + 1
                     
                     # Phase 2: 直接调用 AgentLoop（替代 NATS -> 治理进程的间接路径）
@@ -1042,7 +1049,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if state.state_store:
                             await state.state_store.update(session_id, {"abort_requested": True})
                         await ws_manager.send_to(websocket, {
-                            "type": "task.aborted",
+                            "type": "chat.aborted",
                             "payload": {"session_id": session_id, "status": "aborting"},
                             "timestamp": asyncio.get_event_loop().time(),
                         })
@@ -1050,7 +1057,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as e:
                         logger.warning(f"[WS] 任务中止失败 [{session_id}]: {e}")
                         await ws_manager.send_to(websocket, {
-                            "type": "task.aborted",
+                            "type": "chat.aborted",
                             "payload": {"session_id": session_id, "status": "error", "error": str(e)},
                             "timestamp": asyncio.get_event_loop().time(),
                         })
