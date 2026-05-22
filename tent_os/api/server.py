@@ -922,7 +922,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Phase 2: 直接调用 AgentLoop（替代 NATS -> 治理进程的间接路径）
                     capabilities = {}
-                    if tools:
+                    if isinstance(tools, dict):
+                        capabilities["web_search"] = bool(tools.get("web_search"))
+                        capabilities["file_ops"] = bool(tools.get("file_ops"))
+                    elif tools:
                         capabilities["web_search"] = "web_search" in tools
                         capabilities["file_ops"] = "file_ops" in tools
                     
