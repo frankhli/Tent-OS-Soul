@@ -1,0 +1,86 @@
+# ========================================
+# Python
+# ========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ========================================
+# Virtual environments
+# ========================================
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ========================================
+# IDEs
+# ========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ========================================
+# macOS
+# ========================================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ========================================
+# Testing & Coverage
+# ========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ========================================
+# Tent OS - Project specific
+# ========================================
+# Runtime data
+tent_scheduler.db
+tent_scheduler.db-shm
+tent_scheduler.db-wal
+tent_memory/
+tent_logs/
+logs/archive/
+workspace/
+
+# Logs (keep latest tent_os.log for debugging, archive others)
+*.log
+*.out
+!tent_os.log
+
+# Node.js (frontend build artifacts)
+node_modules/
+*.local
+
+# Data files
+data/*.db
+data/*.db-*
+
+# Backup directories
+tent_os.backup_*/

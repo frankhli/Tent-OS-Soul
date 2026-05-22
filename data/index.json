@@ -1,0 +1,86 @@
+{
+  "tent://memory/user/profile.md": {
+    "uri": "tent://memory/user/profile.md",
+    "title": "用户画像",
+    "temperature": "hot",
+    "memory_type": "profile",
+    "keywords": [],
+    "last_accessed": "2026-04-23T08:07:49.392121",
+    "access_count": 4
+  },
+  "tent://memory/user/preferences.md": {
+    "uri": "tent://memory/user/preferences.md",
+    "title": "用户偏好",
+    "temperature": "hot",
+    "memory_type": "preference",
+    "keywords": [],
+    "last_accessed": "2026-04-23T08:07:49.392138",
+    "access_count": 4
+  },
+  "tent://memory/decisions/active.md": {
+    "uri": "tent://memory/decisions/active.md",
+    "title": "关键决策",
+    "temperature": "warm",
+    "memory_type": "decision",
+    "keywords": [],
+    "last_accessed": "",
+    "access_count": 0
+  },
+  "tent://memory/learnings/recent.md": {
+    "uri": "tent://memory/learnings/recent.md",
+    "title": "近期教训",
+    "temperature": "warm",
+    "memory_type": "learning",
+    "keywords": [],
+    "last_accessed": "",
+    "access_count": 0
+  },
+  "tent://memory/tasks/active.md": {
+    "uri": "tent://memory/tasks/active.md",
+    "title": "待办任务",
+    "temperature": "hot",
+    "memory_type": "task",
+    "keywords": [],
+    "last_accessed": "2026-04-23T08:07:49.392141",
+    "access_count": 4
+  },
+  "tent://memory/entities/projects.md": {
+    "uri": "tent://memory/entities/projects.md",
+    "title": "项目实体",
+    "temperature": "warm",
+    "memory_type": "entity",
+    "keywords": [],
+    "last_accessed": "",
+    "access_count": 0
+  },
+  "tent://memory/entities/people.md": {
+    "uri": "tent://memory/entities/people.md",
+    "title": "人物实体",
+    "temperature": "warm",
+    "memory_type": "entity",
+    "keywords": [],
+    "last_accessed": "",
+    "access_count": 0
+  },
+  "tent://memory/session/current.md": {
+    "uri": "tent://memory/session/current.md",
+    "title": "当前会话",
+    "temperature": "hot",
+    "memory_type": "conversation",
+    "keywords": [],
+    "last_accessed": "2026-04-23T08:07:49.392143",
+    "access_count": 4
+  },
+  "tent://memory/test/preference/coffee_001": {
+    "uri": "tent://memory/test/preference/coffee_001",
+    "title": "preference: 我喜欢喝拿铁咖啡，不加糖...",
+    "temperature": "hot",
+    "memory_type": "preference",
+    "keywords": [
+      "我喜欢喝拿铁咖啡",
+      "不加糖"
+    ],
+    "last_accessed": "2026-04-23T08:07:49.392145",
+    "access_count": 4
+  }
+}

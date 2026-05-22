@@ -1,0 +1,116 @@
+nats_url: nats://localhost:4222
+redis_url: redis://localhost:6379
+use_redis: true
+
+memory:
+  storage_path: ./tent_memory
+
+scheduler:
+  db_path: ./tent_scheduler.db
+  heartbeat_path: ./HEARTBEAT.md
+
+governance:
+  approval_threshold: 0.5
+  auto_approve: false
+  enable_evaluator: true
+  enable_procedural_memory: true
+  cognitive_budget_seconds: 3600
+  context_max_tokens: 128000
+  max_tool_loop_messages: 50
+  compaction_trigger_messages: 100
+
+llm:
+  provider: kimi_coding
+  api_key: sk-kimi-qoFIKrnCfYDkZrfBhhNpxFl5P9N2hvW9frp2K2aEcAhqlnaL8pQFCy4crJ4Rb7nu
+  model: kimi-k2.6
+  base_url: https://api.kimi.com/coding/v1
+  user_agent: claude-code/0.1
+  temperature: 0.3
+  max_concurrent: 8
+
+vision_llm:
+  provider: openai_compatible
+  api_key: sk-kimi-qoFIKrnCfYDkZrfBhhNpxFl5P9N2hvW9frp2K2aEcAhqlnaL8pQFCy4crJ4Rb7nu
+  model: kimi-k2-6
+  base_url: https://api.moonshot.cn/v1
+  temperature: 0.3
+
+tools:
+  profile: full
+  max_result_chars: 4000
+
+stream:
+  block_streaming: true
+  min_chunk_chars: 40
+  max_chunk_chars: 300
+  coalesce_ms: 80
+
+workspace:
+  mode: unrestricted
+
+local_executor:
+  mode: local
+  auto_approve: false
+  allow_write: true
+  timeout_seconds: 30
+  audit_db_path: ./tent_memory/audit.db
+  sandbox:
+    image: alpine:latest
+    network: none
+    allow_write: false
+    max_memory: 256m
+    timeout_seconds: 30
+
+timeouts:
+  tool_loop: 3600
+  local_executor: 60
+  sandbox_executor: 60
+  scheduler_step: 300
+  llm_request: 180
+  speculative: 10
+  security_assessment: 5
+
+heartbeat:
+  enabled: true
+  interval: 1800
+
+brain_v2:
+  enabled: true
+  mode: standard
+  default_persona: work
+
+dreaming:
+  enabled: true
+  schedule: "0 2 * * *"
+  depth: 3
+
+# 阈值配置（避免代码中硬编码）
+thresholds:
+  memory_compression:
+    accumulation_tokens: 2000        # 累积Token达此值触发压缩
+    time_seconds: 3600               # 超过此时间未压缩则检查
+    min_accumulation_for_time: 300   # 时间触发时的最小累积Token
+    instant_summary_tokens: 800      # 单回合超过此值即时生成摘要
+  hierarchical_memory:
+    compression_threshold_messages: 25  # 消息数超此值启用分层
+    recent_keep_messages: 20            # 保留最近N条详细消息
+  agent_orchestrator:
+    skill_match_score: 0.15         # 技能匹配基础分数
+    fatigue_increment: 0.1          # 每次任务疲劳度增量
+    max_fatigue: 1.0                # 最大疲劳度
+
+# [SOUL] 灵魂积累层配置
+soul:
+  storage_path: ./tent_memory/soul
+  password: null  # 用户设置密码后启用AES加密
+  enable_thought_extraction: true
+  enable_voice_modeling: true
+  enable_appearance_modeling: true
+  # TTS 配置
+  tts:
+    provider: edge_tts  # edge_tts | mimo | coqui
+    fallback_voice: zh-CN-XiaoxiaoNeural
+  # 形象渲染配置
+  avatar:
+    renderer: live2d  # live2d | threejs
+    default_model: ./tent_os/api/ui/dist/models/tent_avatar/tent_avatar.model3.json

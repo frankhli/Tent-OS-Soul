@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ===== Light Theme (default) ===== */
+  :root {
+    --bg-base: #f8f9fb;
+    --bg-elevated: #ffffff;
+    --bg-panel: #ffffff;
+    --bg-overlay: #f1f2f5;
+    --bg-input: #f1f2f5;
+
+    --line-subtle: #e8e9ed;
+    --line-default: #d1d3db;
+    --line-active: #a5a8b4;
+
+    --text-primary: #1a1b1f;
+    --text-secondary: #4b4d58;
+    --text-muted: #8a8d99;
+    --text-disabled: #b8bbc4;
+
+    --accent: #7c3aed;
+    --accent-hover: #6d28d9;
+    --accent-subtle: rgba(124,58,237,0.08);
+    --accent-border: rgba(124,58,237,0.25);
+  }
+
+  /* ===== Dark Theme ===== */
+  .dark {
+    --bg-base: #08080c;
+    --bg-elevated: #0f0f15;
+    --bg-panel: #16161e;
+    --bg-overlay: #1f1f2a;
+    --bg-input: #1c1c26;
+
+    --line-subtle: #252530;
+    --line-default: #323240;
+    --line-active: #474760;
+
+    --text-primary: #ececf1;
+    --text-secondary: #9f9fb0;
+    --text-muted: #6e6e80;
+    --text-disabled: #4a4a5c;
+
+    --accent: #8b5cf6;
+    --accent-hover: #7c3aed;
+    --accent-subtle: rgba(139,92,246,0.12);
+    --accent-border: rgba(139,92,246,0.30);
+  }
+
+  body {
+    font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    overflow: hidden;
+    background: var(--bg-base);
+    color: var(--text-secondary);
+  }
+}
+
+@layer components {
+  .chat-bubble-user {
+    background: var(--accent);
+    color: #ffffff;
+    border-radius: 16px 16px 4px 16px;
+  }
+  .chat-bubble-ai {
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    border: 1px solid var(--line-subtle);
+    border-radius: 16px 16px 16px 4px;
+  }
+  .soul-gradient {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  }
+
+  /* 细滚动条 */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 5px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: var(--line-default);
+    border-radius: 3px;
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-default) transparent;
+  }
+
+  .animate-scan {
+    animation: scan 2s linear infinite;
+  }
+}
+
+@keyframes scan {
+  0% { top: 0; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}

@@ -1,0 +1,61 @@
+# Tent OS 策略规则
+# 规则按顺序执行，第一条匹配的规则生效
+
+policies:
+  # === 输入层防护 ===
+  - name: "拒绝空任务"
+    condition: "len(task) < 3"
+    action: "deny"
+    params:
+      reason: "任务描述太短"
+
+  # === 动作层防护 ===
+  - name: "高危操作需审批"
+    condition: "action in ['delete', 'rm', 'format', 'shutdown']"
+    action: "require_approval"
+    params:
+      min_approvers: 1
+      reason: "破坏性操作需要人工确认"
+
+  - name: "物理操作夜间限制"
+    condition: "is_physical and (hour >= 22 or hour <= 6)"
+    action: "deny"
+    params:
+      reason: "夜间禁止物理执行者操作（紧急情况除外）"
+
+  - name: "未授权执行者拒绝"
+    condition: "not executor.authorized"
+    action: "deny"
+    params:
+      reason: "执行者未授权"
+
+  # === 执行者状态防护 ===
+  - name: "熔断执行者拒绝"
+    condition: "executor.status == 'offline'"
+    action: "deny"
+    params:
+      reason: "执行者已熔断"
+
+  - name: "连续失败限制"
+    condition: "executor.consecutive_failures >= 3"
+    action: "circuit_break"
+    params:
+      cooldown: 300
+
+  - name: "队列深度限制"
+    condition: "executor.queue_depth >= 10"
+    action: "deny"
+    params:
+      reason: "执行者队列已满"
+
+  # === 输出层防护 ===
+  - name: "PII 数据检测"
+    condition: "contains_pii(result)"
+    action: "redact"
+    params:
+      fields: ["phone", "email", "id_card"]
+
+  # === 默认规则 ===
+  - name: "默认允许"
+    condition: "true"
+    action: "allow"

@@ -1,0 +1,29 @@
+[project]
+name = "tent-os"
+version = "0.1.0"
+description = "去AI化的智能体内核"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "nats-py>=2.5.0",
+    "redis>=5.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "httpx>=0.25.0",
+    "tiktoken>=0.5.0",
+    "croniter>=2.0.0",
+    "numpy>=1.24.0",
+    "pyyaml>=6.0.1",
+    "pypdf>=4.0.0",
+    "python-docx>=1.1.0",
+    "openpyxl>=3.1.0",
+    "edge-tts>=6.1.0",
+    "cryptography>=42.0.0",
+]
+
+[project.scripts]
+tent-os = "tent_os.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tent_os*"]

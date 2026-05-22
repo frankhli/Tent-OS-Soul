@@ -1,0 +1,147 @@
+# Tent OS Docker Compose —— multi-service 模式（生产级）
+# 每个 worker 独立容器，可水平扩展
+# 使用方式：docker-compose -f docker-compose.multi.yml up
+
+version: "3.8"
+
+services:
+  nats:
+    image: nats:2.11-alpine
+    command: -js -m 8222
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats_data:/data/jetstream
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # 记忆 Worker（海马体）
+  memory-worker:
+    build: .
+    image: tent-os:latest
+    command: worker memory
+    volumes:
+      - tent_data:/app/data
+      - ./skills:/app/skills
+      - ./workspace:/app/workspace
+    environment:
+      - TENT_OS_NATS_URL=nats://nats:4222
+      - TENT_OS_REDIS_URL=redis://redis:6379
+      - TENT_OS_USE_REDIS=true
+      - TENT_OS_DATA_DIR=/app/data
+      - TENT_OS_CONFIG=/app/config/tent_os.docker.yaml
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  # 治理 Worker（前额叶）
+  governance-worker:
+    build: .
+    image: tent-os:latest
+    command: worker governance
+    volumes:
+      - tent_data:/app/data
+      - ./skills:/app/skills
+      - ./workspace:/app/workspace
+    environment:
+      - TENT_OS_NATS_URL=nats://nats:4222
+      - TENT_OS_REDIS_URL=redis://redis:6379
+      - TENT_OS_USE_REDIS=true
+      - TENT_OS_DATA_DIR=/app/data
+      - TENT_OS_CONFIG=/app/config/tent_os.docker.yaml
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  # 调度 Worker（神经-肌肉）
+  scheduler-worker:
+    build: .
+    image: tent-os:latest
+    command: worker scheduler
+    volumes:
+      - tent_data:/app/data
+      - ./skills:/app/skills
+      - ./workspace:/app/workspace
+      - /var/run/docker.sock:/var/run/docker.sock  # 沙箱化需要
+    environment:
+      - TENT_OS_NATS_URL=nats://nats:4222
+      - TENT_OS_REDIS_URL=redis://redis:6379
+      - TENT_OS_USE_REDIS=true
+      - TENT_OS_DATA_DIR=/app/data
+      - TENT_OS_CONFIG=/app/config/tent_os.docker.yaml
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  # API Server + Control UI
+  api-server:
+    build: .
+    image: tent-os:latest
+    command: server --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - tent_data:/app/data
+      - ./skills:/app/skills
+      - ./workspace:/app/workspace
+    environment:
+      - TENT_OS_NATS_URL=nats://nats:4222
+      - TENT_OS_REDIS_URL=redis://redis:6379
+      - TENT_OS_USE_REDIS=true
+      - TENT_OS_DATA_DIR=/app/data
+      - TENT_OS_CONFIG=/app/config/tent_os.docker.yaml
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      memory-worker:
+        condition: service_started
+      governance-worker:
+        condition: service_started
+      scheduler-worker:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  nats_data:
+  redis_data:
+  tent_data:

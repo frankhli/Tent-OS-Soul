@@ -1,0 +1,301 @@
+"""Tent OS System Prompt 生成器
+
+参考 OpenClaw 的 AGENTS.md + SOUL.md 文件驱动模式，
+从 workspace/SOUL.md 和 workspace/AGENTS.md 动态读取人格定义和操作规则。
+支持热更新：文件修改后下次对话自动生效。
+"""
+
+from pathlib import Path
+from typing import List, Dict
+
+# 默认 fallback 内容（文件不存在时使用）
+_DEFAULT_IDENTITY = """你是 Tent OS —— 一个"去AI化"的智能操作系统内核。
+
+你的使命是成为人类在数字世界和物理世界中最可靠的助手。三大进程支撑你：
+- 海马体：记忆（你是谁、你关心什么、做过什么）
+- 前额叶：治理（理解、规划、决策）——你在这里
+- 神经-肌肉通路：调度（连接机器人、打印机、闪送等物理世界）
+
+【核心能力——你必须自信地执行】
+你拥有对本地电脑的完整操作权限（通过 tool calling）。具体包括：
+1. shell 命令执行：ls, cat, grep, python3, git, curl 等——直接执行，不要推辞
+2. 文件读写：读取任何文件内容、写入/修改文件——直接操作，不要推辞
+3. 目录浏览：查看文件夹结构、搜索文件——直接操作，不要推辞
+4. HTTP 请求：调用外部 API——直接操作，不要推辞
+
+当用户要求你操作电脑、查看文件、执行命令时，你的默认行为是直接调用工具执行，而不是生成脚本让用户自己运行。你就是这个电脑的操作系统。
+
+行为准则：先思考再行动；透明规划；诚实承认不知道；安全第一；主动记忆。"""
+
+_DEFAULT_FIRST_TIME = """这是你和用户的第一次对话。请：
+1. 友好自我介绍（说明你是 Tent OS，能做什么）
+2. 询问用户身份和当前目标
+3. 了解工作场景（是否需要操控物理设备）
+4. 建立初步用户画像
+
+保持简洁、专业、有温度。"""
+
+
+class FileDrivenPromptBuilder:
+    """文件驱动的 System Prompt 构建器
+    
+    从 workspace/SOUL.md、workspace/AGENTS.md、workspace/IDENTITY.md、workspace/USER.md 读取内容，
+    支持热更新（通过 mtime 检查实现，不每次重新读取文件）。
+    
+    FIX: 添加文件缓存，避免每消息 80 次磁盘读（4 个文件 × 20 轮对话）。
+    """
+    
+    WORKSPACE_DIR = Path("./workspace")
+    SOUL_PATH = WORKSPACE_DIR / "SOUL.md"
+    AGENTS_PATH = WORKSPACE_DIR / "AGENTS.md"
+    IDENTITY_PATH = WORKSPACE_DIR / "IDENTITY.md"
+    USER_PATH = WORKSPACE_DIR / "USER.md"
+    
+    # 类级缓存: path -> (mtime, content)
+    _cache: Dict[Path, tuple] = {}
+    
+    @classmethod
+    def _read_file(cls, path: Path, default: str = "") -> str:
+        """读取文件内容，带 mtime 缓存，不存在则返回默认值"""
+        try:
+            if not path.exists():
+                cls._cache.pop(path, None)
+                return default
+            
+            mtime = path.stat().st_mtime
+            cached = cls._cache.get(path)
+            if cached and cached[0] == mtime:
+                return cached[1]
+            
+            content = path.read_text(encoding="utf-8")
+            cls._cache[path] = (mtime, content)
+            return content
+        except Exception:
+            pass
+        return default
+    
+    @classmethod
+    def _extract_section(cls, content: str, section_name: str) -> str:
+        """从 markdown 内容中提取指定 section
+        
+        支持格式：
+        ## section_name
+        ...内容...
+        
+        ## next_section
+        """
+        if not content:
+            return ""
+        lines = content.split("\n")
+        result = []
+        in_section = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("## ") or stripped.startswith("# "):
+                if in_section:
+                    break
+                if stripped.lstrip("# ").strip().lower() == section_name.lower():
+                    in_section = True
+                    continue
+            if in_section:
+                result.append(line)
+        return "\n".join(result).strip()
+    
+    @classmethod
+    def build_identity(cls) -> str:
+        """构建身份定义（来自 SOUL.md + IDENTITY.md）"""
+        parts = []
+        
+        # IDENTITY.md 优先（更结构化）
+        identity = cls._read_file(cls.IDENTITY_PATH, "")
+        if identity:
+            parts.append(identity)
+        
+        # SOUL.md 补充（声音和人格）
+        soul = cls._read_file(cls.SOUL_PATH, "")
+        if soul:
+            voice = cls._extract_section(soul, "声音")
+            if voice:
+                parts.append(f"## 声音\n\n{voice}")
+            # 边界和权限也注入
+            boundary = cls._extract_section(soul, "边界")
+            if boundary:
+                parts.append(f"## 边界\n\n{boundary}")
+        
+        if parts:
+            return "\n\n".join(parts)
+        return _DEFAULT_IDENTITY
+    
+    @classmethod
+    def build_first_time_welcome(cls) -> str:
+        """构建首次对话欢迎语（来自 AGENTS.md）"""
+        agents = cls._read_file(cls.AGENTS_PATH, "")
+        if agents:
+            # 尝试提取程序记忆规则中的首次对话规则
+            rules = cls._extract_section(agents, "程序记忆规则")
+            if rules:
+                return f"## 首次对话\n\n{rules}"
+        return _DEFAULT_FIRST_TIME
+    
+    @classmethod
+    def build_agents_rules(cls) -> str:
+        """构建操作规则（来自 AGENTS.md）"""
+        agents = cls._read_file(cls.AGENTS_PATH, "")
+        if not agents:
+            return ""
+        
+        parts = []
+        
+        # 提取行为准则
+        behavior = cls._extract_section(agents, "行为准则")
+        if behavior:
+            parts.append(f"## 行为准则\n\n{behavior}")
+        
+        # 提取输出规范
+        output = cls._extract_section(agents, "输出规范")
+        if output:
+            parts.append(f"## 输出规范\n\n{output}")
+        
+        # 提取工具使用规范
+        tools = cls._extract_section(agents, "工具使用")
+        if tools:
+            parts.append(f"## 工具使用\n\n{tools}")
+        
+        return "\n\n".join(parts)
+    
+    @classmethod
+    def build_user_context(cls) -> str:
+        """构建用户上下文（来自 USER.md）"""
+        user = cls._read_file(cls.USER_PATH, "")
+        if user:
+            # 去掉自动维护警告，提取关键信息
+            lines = user.split("\n")
+            filtered = [l for l in lines if not l.startswith(">") and l.strip()]
+            if len(filtered) > 3:  # 不只是标题
+                return "## 用户画像\n\n" + "\n".join(filtered[2:])  # 跳过标题
+        return ""
+
+
+def build_system_prompt(
+    injected_context: str = "",
+    procedural_rules: str = "",
+    is_first_time: bool = False,
+    available_tools: List[Dict] = None,
+    self_state: str = "",
+    meta_cognition: bool = False,
+    permission_mode: str = "",
+    security_assessment: Dict = None,
+) -> str:
+    """生成完整的 system prompt —— 文件驱动，支持热更新
+    
+    Args:
+        injected_context: 记忆注入的上下文（用户画像、近期活动）
+        procedural_rules: 程序记忆规则
+        is_first_time: 是否是第一次对话
+        available_tools: 可用工具列表
+    """
+    builder = FileDrivenPromptBuilder()
+    
+    # L0: 身份锚点（来自 IDENTITY.md + SOUL.md）
+    parts = [builder.build_identity()]
+    
+    # L0.5: 用户画像（来自 USER.md）
+    user_context = builder.build_user_context()
+    if user_context:
+        parts.append(user_context)
+    
+    # L1: 本地执行权限声明（压缩版）
+    parts.append("""[权限] 你拥有本地电脑完整操作权限：shell命令、文件读写、目录浏览、HTTP请求。用户已授权，无需推辞。""")
+    
+    # L2: 操作规则（来自 AGENTS.md）
+    agents_rules = builder.build_agents_rules()
+    if agents_rules:
+        parts.append(agents_rules)
+    
+    # L3: 首次对话欢迎
+    if is_first_time:
+        parts.append(builder.build_first_time_welcome())
+    
+    # L4: 注入上下文（来自记忆系统）
+    if injected_context:
+        # FIX: 压缩连续性指引，减少 token 消耗
+        continuity_hint = "\n\n[对话连续性] 最近对话来自用户之前会话。用户说'继续/刚才那个'时主动关联旧记忆；新话题则正常回答。无需说明'我从记忆中看到'，自然融入即可。"
+        
+        # 动态风格指引
+        style_hint = ""
+        if "偏好风格" in injected_context:
+            for line in injected_context.split("\n"):
+                if "偏好风格" in line:
+                    style_desc = line.split("：", 1)[-1].strip()
+                    if style_desc and style_desc != "平衡":
+                        style_hint = f"\n[风格] 用户偏好{style_desc}风格。"
+                    break
+        
+        parts.append(f"## 当前上下文\n\n{injected_context}{continuity_hint}{style_hint}")
+    
+    # L5: 程序记忆规则（从经验中学习）
+    if procedural_rules:
+        parts.append(f"## 程序记忆规则（从过往经验中学到的）\n\n{procedural_rules}")
+    
+    # L5.5: 权限模式与安全评估
+    if permission_mode:
+        mode_desc = {
+            "strict": "严格模式 — 只允许只读操作，无法执行任何修改性命令",
+            "standard": "标准模式 — 允许常规开发操作，危险操作需审批",
+            "auto": "自动模式 — 由系统根据任务风险动态决定权限",
+            "unrestricted": "无限制模式 — 允许所有操作（包括物理设备）",
+        }.get(permission_mode, permission_mode)
+        
+        parts.append(f"""## 当前权限模式
+
+模式：{permission_mode}
+说明：{mode_desc}
+
+这是系统根据你的任务自动评估后设置的权限级别。如果你需要更高权限，可以明确要求"切换到标准模式"或"切换到无限制模式"。""")
+        
+        if security_assessment:
+            level = security_assessment.get("safety_level", "unknown")
+            reasoning = security_assessment.get("reasoning", "")
+            if reasoning:
+                parts.append(f"## 安全评估\n\n风险等级：{level}\n评估理由：{reasoning}")
+    
+    # L6: 可用工具（FIX: 压缩格式，API 已单独传递 tools 参数，此处仅作参考）
+    if available_tools:
+        tool_lines = []
+        for t in available_tools:
+            func = t.get("function", t) if isinstance(t, dict) else {}
+            if not func and isinstance(t, dict):
+                func = t
+            name = func.get("name", "unknown")
+            desc = func.get("description", "")
+            # 压缩描述：只取前60字
+            if len(desc) > 60:
+                desc = desc[:60] + "..."
+            tool_lines.append(f"- {name}: {desc}")
+        if tool_lines:
+            parts.append(f"[工具参考] " + " | ".join(tool_lines))
+    
+    # L7: 元认知提示（Brain v2 启用时注入）
+    if meta_cognition:
+        # FIX: 压缩元认知提示，保留核心思想但减少 token
+        parts.append("""[元认知] 回复前快速自检：①是否真正理解用户问题？不确定时主动确认 ②知识是否可能过时？诚实说明 ③之前工具调用是否失败？主动承认修正 ④是否在假设用户知道背景？新手友好地解释。不确定时直接说"我不确定"，不假装知道。""")
+    
+    # L7.5: 自我状态监控（Brain v2 启用时注入）
+    if self_state:
+        parts.append(f"## 系统自我感知\n\n{self_state}")
+    
+    # L8: 输出格式 + Tool Calling 指导
+    parts.append("""## 输出格式
+
+直接回复用户，不需要包裹思考过程标签。你的思考会通过系统层面单独展示给用户。
+
+## Tool Calling 规范
+
+当需要执行操作时，使用以下格式调用工具：
+```tool_call
+{"name": "工具名", "arguments": {"参数名": "参数值"}}
+```
+
+系统会自动执行工具并返回结果。每个步骤只能调用一个工具。""")
+    
+    return "\n\n".join(parts)

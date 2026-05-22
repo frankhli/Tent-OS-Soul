@@ -1,0 +1,88 @@
+# Tent OS OPA 策略配置
+# 设计理念: 默认拒绝，显式允许
+
+packages:
+  # === 安全包: 动作安全策略 ===
+  security:
+    default: deny
+    metadata:
+      owner: "security-team"
+      version: "1.0"
+    rules:
+      - name: "空任务拒绝"
+        conditions: ["len(input.task) < 3"]
+        decision: deny
+        params:
+          reason: "任务描述太短"
+          audit_level: warn
+
+      - name: "高危操作需审批"
+        conditions: ["input.action in ['delete', 'rm', 'format', 'shutdown']"]
+        decision: require_approval
+        priority: 100
+        params:
+          min_approvers: 1
+          reason: "破坏性操作需要人工确认"
+
+      - name: "物理操作夜间限制"
+        conditions:
+          - "input.is_physical"
+          - "input.hour >= 22 or input.hour <= 6"
+        type: set_intersection
+        decision: deny
+        params:
+          reason: "夜间禁止物理执行者操作"
+
+      - name: "未授权拒绝"
+        conditions: ["not input.executor.authorized"]
+        decision: deny
+        priority: 200
+        params:
+          reason: "执行者未授权"
+
+      - name: "熔断保护"
+        conditions: ["input.executor.consecutive_failures >= 3"]
+        decision: circuit_break
+        priority: 200
+        params:
+          cooldown: 300
+          reason: "执行者连续失败过多"
+
+  # === 合规矩: 数据合规策略 ===
+  compliance:
+    default: allow
+    import: ["security"]
+    rules:
+      - name: "PII 数据脱敏"
+        conditions: ["contains(input.result, 'PII') or regex_match(input.result, '\\d{11}')"]
+        decision: redact
+        params:
+          fields: ["phone", "email", "id_card"]
+          reason: "检测到敏感信息"
+
+      - name: "工作时间限制"
+        conditions: ["not in_range(input.hour, 9, 18)"]
+        type: set_union
+        decision: audit
+        time_window:
+          start_hour: 0
+          end_hour: 24
+        params:
+          reason: "非工作时间操作已记录"
+
+  # === 运维包: 运维策略 ===
+  ops:
+    default: allow
+    rules:
+      - name: "队列深度限制"
+        conditions: ["input.executor.queue_depth >= 10"]
+        decision: deny
+        params:
+          reason: "执行者队列已满"
+
+      - name: "默认允许"
+        conditions: ["true"]
+        decision: allow
+        priority: -100
+        params:
+          reason: "无安全策略匹配，默认允许"

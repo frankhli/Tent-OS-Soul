@@ -1,0 +1,18 @@
+nats_url: nats://localhost:4222
+redis_url: redis://localhost:6379
+use_redis: false
+
+memory:
+  storage_path: ./tent_memory
+
+scheduler:
+  db_path: ./tent_scheduler.db
+  heartbeat_path: ./HEARTBEAT.md
+
+llm:
+  provider: kimi_coding
+  api_key: YOUR_API_KEY_HERE
+  model: kimi-k2.6
+  base_url: https://api.kimi.com/coding/v1
+  user_agent: claude-code/0.1
+  temperature: 0.3

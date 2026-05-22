@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""
+Tent OS Control UI E2E Test v2
+- 独立 session 避免串扰
+- 增加超时到 90s
+- 等待 chat.completed 再进入下一测试
+- 实时显示流式输出便于观察
+"""
+import asyncio, json, sys, time, uuid, websockets
+
+API_BASE = "http://localhost:8002"
+WS_URL = "ws://localhost:8002/ws"
+API_KEY = "sk-kimi-qoFIKrnCfYDkZrfBhhNpxFl5P9N2hvW9frp2K2aEcAhqlnaL8pQFCy4crJ4Rb7nu"
+TIMEOUT = 90
+
+passed, failed = 0, 0
+results = []
+
+def _report(name, ok, detail=""):
+    global passed, failed
+    mark = "✅" if ok else "❌"
+    if ok: passed += 1
+    else: failed += 1
+    results.append(f"  {mark} {name}: {detail}")
+    print(f"\n{'='*60}")
+    print(f"  {mark} {name}")
+    if detail: print(f"  {detail}")
+
+async def _wait_for_reply(ws, session_id, expect_tools=False):
+    chunks = []
+    reasoning_chunks = []
+    tool_progress = []
+    done = False
+    start = time.time()
+
+    while not done and (time.time() - start) < TIMEOUT:
+        try:
+            msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            data = json.loads(msg)
+            msg_type = data.get("type", "")
+            payload = data.get("payload", {})
+            sid = payload.get("session_id", "")
+
+            if sid and sid != session_id:
+                continue
+
+            if msg_type == "chat.stream_chunk":
+                text = payload.get("text", "")
+                chunk_type = payload.get("chunk_type", "content")
+                if chunk_type == "reasoning":
+                    reasoning_chunks.append(text)
+                else:
+                    chunks.append(text)
+                    print(text, end="", flush=True)
+
+            elif msg_type == "chat.stream_reasoning":
+                text = payload.get("text", "")
+                reasoning_chunks.append(text)
+
+            elif msg_type == "chat.tool_progress":
+                info = payload.get("info", "")
+                tool_progress.append(info)
+                print(f"\n🔧 [{info}]\n", end="", flush=True)
+
+            elif msg_type in ("chat.completed", "chat.error"):
+                done = True
+                break
+
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            print(f"\n[WS Error: {e}]")
+            break
+
+    full = "".join(chunks)
+    return full, reasoning_chunks, tool_progress, done
+
+async def test_1_basic_chat(ws):
+    print(f"\n{'='*60}")
+    print("TEST 1: 基础聊天（验证真流式 + Tent OS 身份）")
+    print(f"{'='*60}")
+    sid = f"t1_{uuid.uuid4().hex[:8]}"
+    msg = {
+        "type": "chat.message",
+        "payload": {
+            "session_id": sid,
+            "content": "你好，请用一句话介绍你自己",
+            "source": "user"
+        }
+    }
+    print(f"📤 发送 → {msg['payload']['content']}")
+    await ws.send(json.dumps(msg))
+
+    full, reasoning, tools, done = await _wait_for_reply(ws, sid)
+    print(f"\n\n📊 content_chunks={len(full)//10}, reasoning_chunks={len(reasoning)}, done={done}")
+    print(f"📊 回复: {full[:200]}...")
+
+    ok = bool(full) and "Tent OS" in full
+    _report("基础聊天", ok, f"内容长度={len(full)}, 包含TentOS={'Tent OS' in full}, 完成={done}")
+    return ok
+
+async def test_2_tool_call(ws):
+    print(f"\n{'='*60}")
+    print("TEST 2: 工具调用（shell 列出文件）")
+    print(f"{'='*60}")
+    sid = f"t2_{uuid.uuid4().hex[:8]}"
+    msg = {
+        "type": "chat.message",
+        "payload": {
+            "session_id": sid,
+            "content": "请用shell命令列出当前目录下的文件，告诉我有多少个文件",
+            "source": "user"
+        }
+    }
+    print(f"📤 发送 → {msg['payload']['content']}")
+    await ws.send(json.dumps(msg))
+
+    full, reasoning, tools, done = await _wait_for_reply(ws, sid, expect_tools=True)
+    print(f"\n\n📊 content_chunks={len(full)//10}, tools={len(tools)}, done={done}")
+    print(f"📊 回复: {full[:200]}...")
+
+    ok = bool(full) and len(tools) > 0
+    _report("工具调用", ok, f"内容长度={len(full)}, 工具调用={len(tools)}, 完成={done}")
+    return ok
+
+async def test_3_scheduler(ws):
+    print(f"\n{'='*60}")
+    print("TEST 3: 物理执行者调度（scheduler_dispatch → mock）")
+    print(f"{'='*60}")
+    sid = f"t3_{uuid.uuid4().hex[:8]}"
+    msg = {
+        "type": "chat.message",
+        "payload": {
+            "session_id": sid,
+            "content": "请使用 scheduler_dispatch 工具调度 mock 执行者执行 move 动作，target 为 test_object",
+            "source": "user"
+        }
+    }
+    print(f"📤 发送 → {msg['payload']['content']}")
+    await ws.send(json.dumps(msg))
+
+    full, reasoning, tools, done = await _wait_for_reply(ws, sid, expect_tools=True)
+    print(f"\n\n📊 content_chunks={len(full)//10}, tools={len(tools)}, done={done}")
+    print(f"📊 回复: {full[:200]}...")
+
+    ok = bool(full) and ("调度" in full or "执行" in full or "mock" in full.lower())
+    _report("物理执行者调度", ok, f"内容长度={len(full)}, 工具调用={len(tools)}, 完成={done}")
+    return ok
+
+async def test_4_heartbeat(ws):
+    print(f"\n{'='*60}")
+    print("TEST 4: Heartbeat 后台任务查询")
+    print(f"{'='*60}")
+    sid = f"t4_{uuid.uuid4().hex[:8]}"
+    msg = {
+        "type": "chat.message",
+        "payload": {
+            "session_id": sid,
+            "content": "系统最近有没有执行什么后台任务？请简要说明",
+            "source": "user"
+        }
+    }
+    print(f"📤 发送 → {msg['payload']['content']}")
+    await ws.send(json.dumps(msg))
+
+    full, reasoning, tools, done = await _wait_for_reply(ws, sid)
+    print(f"\n\n📊 content_chunks={len(full)//10}, done={done}")
+    print(f"📊 回复: {full[:200]}...")
+
+    ok = bool(full) and len(full) > 20
+    _report("Heartbeat查询", ok, f"内容长度={len(full)}, 完成={done}")
+    return ok
+
+async def test_5_memory(ws):
+    print(f"\n{'='*60}")
+    print("TEST 5: 记忆连续性（两轮对话）")
+    print(f"{'='*60}")
+    sid = f"t5_{uuid.uuid4().hex[:8]}"
+
+    # Round 1
+    msg1 = {
+        "type": "chat.message",
+        "payload": {
+            "session_id": sid,
+            "content": "请记住：我的名字叫 Frank，我喜欢简洁专业的回答",
+            "source": "user"
+        }
+    }
+    print(f"📤 Round1 → {msg1['payload']['content']}")
+    await ws.send(json.dumps(msg1))
+    full1, _, _, done1 = await _wait_for_reply(ws, sid)
+    print(f"\n📊 Round1: 长度={len(full1)}, 完成={done1}")
+
+    # Round 2
+    msg2 = {
+        "type": "chat.message",
+        "payload": {
+            "session_id": sid,
+            "content": "我刚才告诉你我叫什么？",
+            "source": "user"
+        }
+    }
+    print(f"📤 Round2 → {msg2['payload']['content']}")
+    await ws.send(json.dumps(msg2))
+    full2, _, _, done2 = await _wait_for_reply(ws, sid)
+    print(f"\n📊 Round2: 长度={len(full2)}, 完成={done2}")
+    print(f"📊 回复: {full2[:200]}...")
+
+    ok = "Frank" in full2
+    _report("记忆连续性", ok, f"Round2长度={len(full2)}, 包含Frank={'Frank' in full2}, 完成={done2}")
+    return ok
+
+async def main():
+    print("="*60)
+    print("Tent OS Control UI E2E Test v2")
+    print(f"API: {API_BASE}")
+    print(f"WebSocket: {WS_URL}")
+    print(f"Timeout per test: {TIMEOUT}s")
+    print("="*60)
+
+    try:
+        ws = await websockets.connect(WS_URL, additional_headers={"X-API-Key": API_KEY}, proxy=None)
+    except Exception as e:
+        print(f"❌ WebSocket 连接失败: {e}")
+        sys.exit(1)
+
+    # Wait for system status
+    try:
+        status_msg = await asyncio.wait_for(ws.recv(), timeout=5)
+        status = json.loads(status_msg)
+        print(f"\n✅ WebSocket 连接成功 | 系统状态: {status.get('payload',{}).get('status','?')}")
+    except Exception as e:
+        print(f"⚠️ 未收到初始状态: {e}")
+
+    await test_1_basic_chat(ws)
+    await test_2_tool_call(ws)
+    await test_3_scheduler(ws)
+    await test_4_heartbeat(ws)
+    await test_5_memory(ws)
+
+    await ws.close()
+
+    print(f"\n{'='*60}")
+    print("测试结果总结")
+    print(f"{'='*60}")
+    for r in results:
+        print(r)
+    print(f"\n总计: {passed}/{passed+failed} 通过")
+    sys.exit(0 if failed == 0 else 1)
+
+if __name__ == "__main__":
+    asyncio.run(main())

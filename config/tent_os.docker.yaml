@@ -1,0 +1,39 @@
+# Tent OS Docker 环境默认配置
+# 环境变量会覆盖此配置文件中的值
+
+nats_url: nats://localhost:4222
+redis_url: redis://localhost:6379
+use_redis: true
+
+memory:
+  storage_path: /app/data/tent_memory
+
+scheduler:
+  db_path: /app/data/tent_scheduler.db
+  heartbeat_path: /app/data/HEARTBEAT.md
+
+governance:
+  approval_threshold: 0.5
+  enable_evaluator: true
+  enable_procedural_memory: true
+
+llm:
+  provider: kimi_coding
+  api_key: ""
+  model: kimi-k2.6
+  base_url: https://api.kimi.com/coding/v1
+  user_agent: claude-code/0.1
+  temperature: 0.3
+
+local_executor:
+  mode: auto
+  allowed_commands: ["ls", "cat", "echo", "curl", "python3", "git", "date", "pwd"]
+  allowed_paths: ["/tmp", "/app/data"]
+  allow_write: false
+  timeout_seconds: 30
+  sandbox:
+    image: alpine:latest
+    network: none
+    allow_write: false
+    max_memory: 256m
+    timeout_seconds: 30

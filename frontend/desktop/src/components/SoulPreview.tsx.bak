@@ -1,0 +1,1876 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import * as api from '../api/soulApi';
+import { CanvasAvatar } from './CanvasAvatar';
+import { FloatingAvatar } from './FloatingAvatar';
+import type { AppearanceConfig } from './avatar/PartSystem';
+import RelationGalaxy from './RelationGalaxy';
+import {
+ Eye, User, Users, Mic, Brain, X, Lightbulb, FileText, Target, Sprout,
+ ThumbsUp, MessageSquare, ScrollText, Save, Zap, Check, Square,
+ RefreshCw, Sparkles, Pencil, ChevronDown, ChevronUp, Wand2, Palette,
+ Upload, Shield,
+} from 'lucide-react';
+import ExternalCorpusImporter from './ExternalCorpusImporter';
+import DeathEventPanel from './DeathEventPanel';
+
+interface PersonaProfileData {
+ user_id?: string;
+ name?: string;
+ ai_name?: string;
+ age?: number;
+ gender?: string;
+ occupation?: string;
+ location?: string;
+ hometown?: string;
+ education?: string;
+ bio?: string;
+ language_style?: string;
+ sentence_pattern?: string;
+ humor_style?: string;
+ catchphrases?: string;
+ speaking_quirks?: string;
+ decision_pattern?: string;
+ thinking_depth?: string;
+ argument_style?: string;
+ emotion_pattern?: string;
+ stress_response?: string;
+ joy_expression?: string;
+ core_values?: string;
+ value_conflicts?: string;
+ relationship_style?: string;
+ social_energy?: string;
+ imperfections?: string;
+ blind_spots?: string;
+ unknown_topics?: string;
+ taboo_topics?: string;
+ growth_notes?: string;
+ life_phases?: string;
+ conversation_count?: number;
+ updated_at?: string;
+}
+
+export default function SoulPreview() {
+ const navigate = useNavigate();
+ const [voiceProfile, setVoiceProfile] = useState<any>(null);
+ const [appearanceProfile, setAppearanceProfile] = useState<any>(null);
+ const [completenessData, setCompletenessData] = useState<api.SoulCompletenessResponse | null>(null);
+ const [, setWill] = useState<any>(null);
+ const [loading, setLoading] = useState(true);
+ const [saving, setSaving] = useState(false);
+ const [toast, setToast] = useState('');
+
+ // Persona Profile (自然语言人格画像)
+ const [personaProfile, setPersonaProfile] = useState<PersonaProfileData | null>(null);
+ const [personaLoading, setPersonaLoading] = useState(false);
+ const [personaRebuilding, setPersonaRebuilding] = useState(false);
+ const [activePersonaTab, setActivePersonaTab] = useState<'basic' | 'language' | 'thinking' | 'emotion' | 'values' | 'imperfections'>('basic');
+ const [editingPersona, setEditingPersona] = useState(false);
+ const [personaEdits, setPersonaEdits] = useState<Partial<PersonaProfileData>>({});
+
+ // Legacy form states
+ const [decision, setDecision] = useState(0.5);
+ const [language, setLanguage] = useState(0.5);
+ const [coreValues, setCoreValues] = useState('');
+ const [heirs, setHeirs] = useState<{ name: string; relationship: string; id: string }[]>([]);
+ const [topicMode, setTopicMode] = useState('all');
+ const [topicWhitelist, setTopicWhitelist] = useState('家庭, 人生建议');
+ const [activation, setActivation] = useState('after_death');
+ const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+ const [isTestChat, setIsTestChat] = useState(false);
+ const [photoPreviews, setPhotoPreviews] = useState<string[]>([]);
+ const [testMessages, setTestMessages] = useState<{ role: string; content: string }[]>([]);
+ const [testInput, setTestInput] = useState('');
+ const [matchScore, setMatchScore] = useState<{ overall: number; decision: number; language: number; values: number } | null>(null);
+ const [matchHistory, setMatchHistory] = useState<{ overall: number; timestamp: number; question: string }[]>([]);
+ const [testChatLoading, setTestChatLoading] = useState(false);
+ const [soulDimensions, setSoulDimensions] = useState<Record<string, number> | null>(null);
+ const [farewellLetter, setFarewellLetter] = useState('');
+ const [accessCode, setAccessCode] = useState('');
+ const [eternalLinkCopied, setEternalLinkCopied] = useState(false);
+ const [showTestChatGuide, setShowTestChatGuide] = useState(false);
+ const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+ const chunksRef = useRef<Blob[]>([]);
+ const milestonesRef = useRef<Set<number>>(new Set());
+
+ // Avatar 外观配置
+ const [avatarConfig, setAvatarConfig] = useState<AppearanceConfig | null>(null);
+ const [avatarStats, setAvatarStats] = useState<any>(null);
+ const [avatarPreviewEmotion, setAvatarPreviewEmotion] = useState('calm');
+
+ // 数字人浮动状态
+ const [isAvatarFloating, setIsAvatarFloating] = useState(false);
+ const [floatInitialPos, setFloatInitialPos] = useState<{ x: number; y: number } | undefined>(undefined);
+ const [dragGuideVisible, setDragGuideVisible] = useState(() => {
+ try { return localStorage.getItem('tent_drag_guide_shown') !== 'true'; } catch { return true; }
+ });
+ // 右侧主标签页
+ const [activeMainTab, setActiveMainTab] = useState<'persona' | 'appearance' | 'voice' | 'will'>('persona');
+
+ useEffect(() => {
+ loadAll();
+ loadAvatar();
+ }, []);
+
+ // Milestone toast for completeness changes
+ useEffect(() => {
+ if (!completenessData) return;
+ const overall = Math.round((completenessData.overall ?? 0) * 100);
+ const milestones = [
+ { threshold: 10, msg: '你的数字灵魂开始了解你了 ✨' },
+ { threshold: 25, msg: '轮廓渐显，继续对话让它更清晰 🌱' },
+ { threshold: 50, msg: '形象已清晰化，可以进行测试对话了 🎯' },
+ { threshold: 75, msg: '数字灵魂逐渐成型，你已接近完成 🚀' },
+ { threshold: 100, msg: '数字灵魂已成型，你已准备好延续给后人 🎉' },
+ ];
+ for (const m of milestones) {
+ if (overall >= m.threshold && !milestonesRef.current.has(m.threshold)) {
+ milestonesRef.current.add(m.threshold);
+ showToast(m.msg);
+ break; // Only show one at a time
+ }
+ }
+ }, [completenessData]);
+
+ // Auto-hide drag guide after 5s
+ useEffect(() => {
+ if (!dragGuideVisible) return;
+ const timer = setTimeout(() => {
+ setDragGuideVisible(false);
+ try { localStorage.setItem('tent_drag_guide_shown', 'true'); } catch {}
+ }, 5000);
+ return () => clearTimeout(timer);
+ }, [dragGuideVisible]);
+
+ // 清理照片预览的 ObjectURL，防止内存泄漏
+ useEffect(() => {
+ return () => {
+ photoPreviews.forEach((url) => {
+ if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+ });
+ };
+ }, [photoPreviews]);
+
+ const loadAll = async () => {
+ setLoading(true);
+ try {
+ const [p, vp, ap, w, comp] = await Promise.all([
+ api.getSoulProfile().catch(() => null),
+ api.getVoiceProfile().catch(() => null),
+ api.getAppearanceProfile().catch(() => null),
+ api.getWill().catch(() => null),
+ api.getSoulCompleteness().catch(() => null),
+ ]);
+ if (p) {
+ setDecision(p.decision_style ?? 0.5);
+ setLanguage(p.language_style ?? 0.5);
+ setCoreValues((p.core_values || []).join(', '));
+ if (p.soul_dimensions) setSoulDimensions(p.soul_dimensions);
+ }
+ if (vp?.profile) setVoiceProfile(vp.profile);
+ if (ap?.profile) setAppearanceProfile(ap.profile);
+ if (comp) setCompletenessData(comp);
+ if (w?.will) {
+ setWill(w.will);
+ setHeirs((w.will.heirs || []).map((h: any) => ({ name: h.name || '', relationship: h.relationship || '', id: h.id || `heir_${Date.now()}_${Math.random()}` })));
+ setTopicMode(w.will.topic_whitelist?.length ? 'custom' : 'all');
+ setTopicWhitelist((w.will.topic_whitelist || []).join(', '));
+ setActivation(w.will.activation_condition || 'after_death');
+ setFarewellLetter(w.will.farewell_letter || '');
+ setAccessCode(w.will.access_code || '');
+ }
+ } finally {
+ setLoading(false);
+ }
+ // 加载人格画像
+ loadPersonaProfile();
+ };
+
+ const loadAvatar = async () => {
+ try {
+ const [cfgRes, statsRes] = await Promise.all([
+ api.getAvatarConfig(),
+ api.getAvatarStats(),
+ ]);
+ if (cfgRes.config) setAvatarConfig(cfgRes.config);
+ if (statsRes.stats) setAvatarStats(statsRes.stats);
+ } catch {}
+ };
+
+ const loadPersonaProfile = async () => {
+ setPersonaLoading(true);
+ try {
+ const res = await fetch(`/api/v1/soul/persona/${api.USER_ID}`);
+ const data = await res.json();
+ if (data.status === 'ok' && data.profile) {
+ setPersonaProfile(data.profile);
+ // 只在非编辑状态下覆盖 edits，避免丢失用户正在进行的修改
+ setPersonaEdits((prev) => {
+ if (editingPersona && Object.keys(prev).length > 0) return prev;
+ return data.profile;
+ });
+ } else {
+ setPersonaProfile(null);
+ }
+ } catch {
+ setPersonaProfile(null);
+ } finally {
+ setPersonaLoading(false);
+ }
+ };
+
+ const rebuildPersona = async () => {
+ setPersonaRebuilding(true);
+ try {
+ const res = await fetch(`/api/v1/soul/persona/${api.USER_ID}/rebuild`, { method: 'POST' });
+ const data = await res.json();
+ if (data.status === 'ok') {
+ setPersonaProfile(data.profile);
+ setPersonaEdits(data.profile);
+ showToast(`人格画像已重建（分析了${data.conversations_analyzed}段对话）`);
+ } else {
+ showToast('重建失败');
+ }
+ } catch {
+ showToast('重建失败');
+ } finally {
+ setPersonaRebuilding(false);
+ }
+ };
+
+ const savePersonaEdits = async () => {
+ setSaving(true);
+ try {
+ const arrayFields = ['catchphrases', 'speaking_quirks', 'core_values', 'imperfections', 'blind_spots', 'unknown_topics', 'taboo_topics'];
+ const payload = { ...personaEdits };
+ arrayFields.forEach((f) => {
+ const v = (payload as any)[f];
+ if (Array.isArray(v)) {
+ (payload as any)[f] = JSON.stringify(v);
+ }
+ });
+ const res = await fetch(`/api/v1/soul/persona/${api.USER_ID}`, {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify(payload),
+ });
+ const data = await res.json();
+ if (data.status === 'ok') {
+ setPersonaProfile(data.profile);
+ setPersonaEdits(data.profile);
+ setEditingPersona(false);
+ showToast('人格画像已保存');
+ }
+ } catch {
+ showToast('保存失败');
+ } finally {
+ setSaving(false);
+ }
+ };
+
+ const showToast = (msg: string) => {
+ setToast(msg);
+ setTimeout(() => setToast(''), 3000);
+ };
+
+ const saveMindProfile = async () => {
+ setSaving(true);
+ try {
+ await api.updateSoulProfile({
+ decision_style: decision,
+ language_style: language,
+ core_values: coreValues.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+ });
+ showToast('思维画像已保存');
+ loadAll();
+ } catch (e: any) {
+ showToast('保存失败: ' + e.message);
+ } finally {
+ setSaving(false);
+ }
+ };
+
+ const saveWillSettings = async () => {
+ setSaving(true);
+ try {
+ await api.setWill({
+ heirs: heirs.map((h) => ({ id: h.id || `heir_${Date.now()}`, name: h.name, relationship: h.relationship, contact: '' })),
+ topic_whitelist: topicMode === 'custom' ? topicWhitelist.split(/[,，]/).map((s) => s.trim()).filter(Boolean) : [],
+ topic_blacklist: [],
+ activation_condition: activation,
+ activation_date: null,
+ farewell_letter: farewellLetter,
+ access_code: accessCode || null,
+ });
+ showToast('遗嘱设置已保存');
+ loadAll();
+ } catch (e: any) {
+ showToast('保存失败: ' + e.message);
+ } finally {
+ setSaving(false);
+ }
+ };
+
+ const handleUploadPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+ const file = e.target.files?.[0];
+ if (!file) return;
+ const previewUrl = URL.createObjectURL(file);
+ setPhotoPreviews((prev) => [previewUrl, ...prev].slice(0, 6));
+ try {
+ await api.uploadAppearancePhoto(file, file.name);
+ showToast('照片已上传');
+ loadAll();
+ } catch (e: any) {
+ showToast('上传失败: ' + e.message);
+ }
+ };
+
+ const handleRecordAudio = async () => {
+ if (isRecordingAudio) {
+ mediaRecorderRef.current?.stop();
+ return;
+ }
+ try {
+ const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+ const recorder = new MediaRecorder(stream);
+ chunksRef.current = [];
+ recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+ recorder.onstop = async () => {
+ const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+ try {
+ await api.uploadVoiceSample(blob, `calib_${Date.now()}.webm`);
+ showToast('校准音频已上传');
+ loadAll();
+ } catch (e: any) {
+ showToast('上传失败: ' + e.message);
+ }
+ stream.getTracks().forEach((t) => t.stop());
+ };
+ recorder.start();
+ mediaRecorderRef.current = recorder;
+ setIsRecordingAudio(true);
+ setTimeout(() => {
+ if (mediaRecorderRef.current?.state === 'recording') {
+ mediaRecorderRef.current.stop();
+ setIsRecordingAudio(false);
+ }
+ }, 8000);
+ } catch (err: any) {
+ showToast('无法访问麦克风: ' + err.message);
+ }
+ };
+
+ const handleTestChat = async () => {
+ if (!testInput.trim() || testChatLoading) return;
+ const userMsg = testInput.trim();
+ const history = testMessages.slice(-6);
+ setTestMessages((prev) => [...prev, { role: 'user', content: userMsg }]);
+ setTestInput('');
+ setTestChatLoading(true);
+ try {
+ const res = await fetch(`/api/v1/soul/chat_test/${api.USER_ID}`, {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ message: userMsg, history }),
+ });
+ const data = await res.json();
+ setTestMessages((prev) => [...prev, { role: 'assistant', content: data.reply || '测试回复：这是基于你当前思维画像的模拟回应。' }]);
+ if (data.match_score) {
+ setMatchScore(data.match_score);
+ setMatchHistory((prev) => [...prev.slice(-9), { overall: data.match_score.overall, timestamp: Date.now(), question: userMsg.slice(0, 30) }]);
+ }
+ } catch {
+ setTestMessages((prev) => [...prev, { role: 'assistant', content: '测试回复：这是基于你当前思维画像的模拟回应。' }]);
+ } finally {
+ setTestChatLoading(false);
+ }
+ };
+
+ const completeness = completenessData ? {
+ thought: completenessData.thought,
+ voice: completenessData.voice,
+ appearance: completenessData.appearance,
+ } : { thought: 0, voice: 0, appearance: 0 };
+ const overall = completenessData?.overall ?? ((completeness.thought + completeness.voice + completeness.appearance) / 3);
+ const details = completenessData?.details;
+
+ const renderSubProgress = (category: 'thought' | 'voice' | 'appearance') => {
+ const items = details?.[category];
+ if (!items) return null;
+ return (
+ <div className="mt-4 space-y-3 border-t border-line-subtle/50 pt-3">
+ <h5 className="text-xs font-medium text-content-muted uppercase tracking-wider">细分进度</h5>
+ {Object.entries(items).map(([key, dim]: [string, any]) => (
+ <div key={key}>
+ <div className="flex items-center justify-between text-xs mb-1">
+ <span className="text-content-muted">{dim.label}</span>
+ <span className="text-content-muted">{dim.have}/{dim.need}{dim.unit || ''} · {Math.round(dim.score * 100)}%</span>
+ </div>
+ <div className="h-1 bg-surface-panel rounded-full overflow-hidden">
+ <div
+ className={`h-full rounded-full transition-all duration-700 ${
+ dim.status === 'complete' ? 'bg-emerald-500' :
+ dim.status === 'collecting' ? 'bg-amber-500' : 'bg-slate-600'
+ }`}
+ style={{ width: `${dim.score * 100}%` }}
+ />
+ </div>
+ {dim.note && <p className="text-[10px] text-content-secondary mt-0.5">{dim.note}</p>}
+ </div>
+ ))}
+ </div>
+ );
+ };
+
+ // 解析JSON字符串为数组
+ const parseJsonList = (val?: string): string[] => {
+ if (!val) return [];
+ try {
+ const parsed = JSON.parse(val);
+ return Array.isArray(parsed) ? parsed : [];
+ } catch {
+ return [];
+ }
+ };
+
+ // 人格画像展示组件
+ const PersonaDisplay = () => {
+ if (personaLoading) {
+ return (
+ <div className="flex items-center justify-center py-12">
+ <RefreshCw className="w-5 h-5 text-accent animate-spin" />
+ <span className="ml-2 text-sm text-content-muted">正在分析人格画像...</span>
+ </div>
+ );
+ }
+
+ if (!personaProfile) {
+ return (
+ <div className="py-8 text-center">
+ <Sparkles className="w-8 h-8 text-content-secondary mx-auto mb-3" />
+ <p className="text-sm text-content-muted mb-2">还没有生成人格画像</p>
+ <p className="text-xs text-content-muted mb-4">系统会在你对话时自动分析你的人格特征。你也可以主动填写，让数字灵魂更快地了解你。</p>
+ <div className="flex gap-2 justify-center">
+ <button
+ onClick={rebuildPersona}
+ disabled={personaRebuilding}
+ className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm transition disabled:opacity-50"
+ >
+ {personaRebuilding ? <><RefreshCw className="w-4 h-4 inline animate-spin" /> 分析中...</> : <><Wand2 className="w-4 h-4 inline" /> 分析历史对话</>}
+ </button>
+ <button
+ onClick={() => {
+ setPersonaProfile({ user_id: api.USER_ID, conversation_count: 0 });
+ setPersonaEdits({ user_id: api.USER_ID });
+ setEditingPersona(true);
+ setActivePersonaTab('basic');
+ }}
+ className="px-4 py-2 bg-surface-overlay hover:bg-surface-overlay text-content-primary rounded-lg text-sm transition"
+ >
+ <Pencil className="w-4 h-4 inline" /> 手动填写
+ </button>
+ </div>
+ </div>
+ );
+ }
+
+ const tabs = [
+ { key: 'basic' as const, label: '基本信息', icon: User },
+ { key: 'language' as const, label: '说话方式', icon: MessageSquare },
+ { key: 'thinking' as const, label: '思维模式', icon: Brain },
+ { key: 'emotion' as const, label: '情感模式', icon: Sparkles },
+ { key: 'values' as const, label: '价值观', icon: Target },
+ { key: 'imperfections' as const, label: '不完美', icon: Pencil },
+ ];
+
+ return (
+ <div>
+ {/* Header */}
+ <div className="flex items-center justify-between mb-4">
+ <div className="flex items-center gap-2">
+ <Sparkles className="w-4 h-4 text-accent" />
+ <span className="text-sm text-content-secondary">
+ 基于 {personaProfile.conversation_count || 0} 轮对话分析
+ </span>
+ {/* 画像完成度 */}
+ {(() => {
+ const filled = [
+ personaProfile.name, personaProfile.age, personaProfile.occupation,
+ personaProfile.language_style, personaProfile.decision_pattern,
+ personaProfile.emotion_pattern, personaProfile.core_values,
+ personaProfile.imperfections,
+ ].filter(v => v && String(v).length > 0 && String(v) !== '[]').length;
+ const total = 8;
+ const pct = Math.round((filled / total) * 100);
+ return (
+ <span className={`text-xs px-2 py-0.5 rounded-full ${pct >= 60 ? 'bg-emerald-500/20 text-emerald-300' : pct >= 30 ? 'bg-amber-500/20 text-amber-300' : 'bg-surface-overlay text-content-muted'}`}>
+ 完成度 {pct}%
+ </span>
+ );
+ })()}
+ </div>
+ <div className="flex gap-2">
+ {editingPersona ? (
+ <>
+ <button
+ onClick={() => { setEditingPersona(false); if (personaProfile) setPersonaEdits(personaProfile); }}
+ className="text-xs px-3 py-1.5 rounded-lg bg-surface-overlay text-content-secondary hover:bg-surface-overlay transition"
+ >
+ 取消
+ </button>
+ <button
+ onClick={savePersonaEdits}
+ disabled={saving}
+ className="text-xs px-3 py-1.5 rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition disabled:opacity-50"
+ >
+ {saving ? '保存中...' : '保存修正'}
+ </button>
+ </>
+ ) : (
+ <>
+ <button
+ onClick={rebuildPersona}
+ disabled={personaRebuilding}
+ className="text-xs px-3 py-1.5 rounded-lg bg-surface-overlay text-content-secondary hover:bg-surface-overlay transition disabled:opacity-50"
+ >
+ {personaRebuilding ? <><RefreshCw className="w-3 h-3 inline animate-spin" /> 重建中</> : <><RefreshCw className="w-3 h-3 inline" /> 重新分析</>}
+ </button>
+ <button
+ onClick={() => setEditingPersona(true)}
+ className="text-xs px-3 py-1.5 rounded-lg bg-violet-600/20 text-violet-300 hover:bg-violet-600/30 transition"
+ >
+ <Pencil className="w-3 h-3 inline" /> 修正画像
+ </button>
+ </>
+ )}
+ </div>
+ </div>
+
+ {/* Tabs */}
+ <div className="flex gap-1 mb-4 overflow-x-auto pb-1">
+ {tabs.map((tab) => (
+ <button
+ key={tab.key}
+ onClick={() => setActivePersonaTab(tab.key)}
+ className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs whitespace-nowrap transition ${
+ activePersonaTab === tab.key
+ ? 'bg-accent-subtle/20 text-violet-300 border border-violet-500/30'
+ : 'bg-surface-panel text-content-muted hover:bg-surface-overlay'
+ }`}
+ >
+ <tab.icon className="w-3.5 h-3.5" />
+ {tab.label}
+ </button>
+ ))}
+ </div>
+
+ {/* Tab Content */}
+ <div className="space-y-4">
+ {activePersonaTab === 'basic' && (
+ <>
+ <p className="text-xs text-content-muted mb-3">这些基础信息帮助数字灵魂了解你是谁。</p>
+ <div className="grid grid-cols-2 gap-3">
+ <PersonaShortField label="姓名" value={personaProfile.name} fieldKey="name" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaShortField label="AI昵称" value={personaProfile.ai_name} fieldKey="ai_name" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaShortField label="年龄" value={personaProfile.age ? String(personaProfile.age) : ''} fieldKey="age" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} type="number" />
+ <PersonaShortField label="性别" value={personaProfile.gender} fieldKey="gender" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaShortField label="职业" value={personaProfile.occupation} fieldKey="occupation" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaShortField label="所在地" value={personaProfile.location} fieldKey="location" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaShortField label="家乡" value={personaProfile.hometown} fieldKey="hometown" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaShortField label="教育背景" value={personaProfile.education} fieldKey="education" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ </div>
+ <PersonaField label="个人简介" value={personaProfile.bio} fieldKey="bio" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="人生阶段" value={personaProfile.life_phases} fieldKey="life_phases" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ </>
+ )}
+ {activePersonaTab === 'language' && (
+ <>
+ <p className="text-xs text-content-muted mb-3">决定了你的数字灵魂会用什么样的语气和后人对谈。</p>
+ <PersonaField label="说话方式" value={personaProfile.language_style} fieldKey="language_style" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="句式习惯" value={personaProfile.sentence_pattern} fieldKey="sentence_pattern" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="幽默风格" value={personaProfile.humor_style} fieldKey="humor_style" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaTagList label="口头禅" items={parseJsonList(personaProfile.catchphrases)} fieldKey="catchphrases" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaTagList label="说话小习惯" items={parseJsonList(personaProfile.speaking_quirks)} fieldKey="speaking_quirks" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ </>
+ )}
+ {activePersonaTab === 'thinking' && (
+ <>
+ <p className="text-xs text-content-muted mb-3">决定了数字灵魂做决策和思考的方式。</p>
+ <PersonaField label="做决定的方式" value={personaProfile.decision_pattern} fieldKey="decision_pattern" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="思考特点" value={personaProfile.thinking_depth} fieldKey="thinking_depth" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="被反驳时的反应" value={personaProfile.argument_style} fieldKey="argument_style" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ </>
+ )}
+ {activePersonaTab === 'emotion' && (
+ <>
+ <p className="text-xs text-content-muted mb-3">帮助数字灵魂理解你处理情绪的方式。</p>
+ <PersonaField label="情绪模式" value={personaProfile.emotion_pattern} fieldKey="emotion_pattern" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="压力大时的表现" value={personaProfile.stress_response} fieldKey="stress_response" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="开心时的表现" value={personaProfile.joy_expression} fieldKey="joy_expression" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ </>
+ )}
+ {activePersonaTab === 'values' && (
+ <>
+ <p className="text-xs text-content-muted mb-3">让数字灵魂知道你最看重什么。</p>
+ <PersonaTagList label="核心价值观" items={parseJsonList(personaProfile.core_values)} fieldKey="core_values" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="价值取舍" value={personaProfile.value_conflicts} fieldKey="value_conflicts" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="对待关系的方式" value={personaProfile.relationship_style} fieldKey="relationship_style" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ <PersonaField label="社交能量" value={personaProfile.social_energy} fieldKey="social_energy" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ </>
+ )}
+ {activePersonaTab === 'imperfections' && (
+ <>
+ <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 mb-4">
+ <p className="text-xs text-amber-300">
+ <Lightbulb className="w-3 h-3 inline mr-1" />
+ 这些"不完美"恰恰是人格真实感的关键。保留它们，你的数字灵魂才会像真正的你。
+ </p>
+ </div>
+ <PersonaTagList label="不完美特征" items={parseJsonList(personaProfile.imperfections)} fieldKey="imperfections" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} color="amber" />
+ <PersonaTagList label="盲区" items={parseJsonList(personaProfile.blind_spots)} fieldKey="blind_spots" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} color="slate" />
+ <PersonaTagList label="不知道的话题" items={parseJsonList(personaProfile.unknown_topics)} fieldKey="unknown_topics" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} color="emerald" />
+ <PersonaTagList label="禁忌话题" items={parseJsonList(personaProfile.taboo_topics)} fieldKey="taboo_topics" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} color="rose" />
+ <PersonaField label="成长观察" value={personaProfile.growth_notes} fieldKey="growth_notes" editing={editingPersona} edits={personaEdits} onEdit={setPersonaEdits} />
+ </>
+ )}
+ </div>
+ </div>
+ );
+ };
+
+ // 声纹采集进度展示组件（模块级，避免内联组件导致的状态丢失）
+function VoiceProfileDisplay({
+ voiceProfile,
+ isRecordingAudio,
+ onRecordAudio,
+ showToast,
+ renderSubProgress,
+}: {
+ voiceProfile: any;
+ isRecordingAudio: boolean;
+ onRecordAudio: () => void;
+ showToast: (msg: string) => void;
+ renderSubProgress: (category: 'thought' | 'voice' | 'appearance') => React.ReactNode;
+}) {
+ const [voiceStats, setVoiceStats] = useState<any>(null);
+ const [checkingClone, setCheckingClone] = useState(false);
+ const [cloneStatus, setCloneStatus] = useState<any>(null);
+
+ useEffect(() => {
+ api.getVoiceStats().then((res) => {
+ if (res.stats) setVoiceStats(res.stats);
+ }).catch(() => {});
+ // 查询克隆状态
+ fetch(`/api/v1/soul/voice/${api.USER_ID}/clone_status`)
+ .then(r => r.json())
+ .then(data => { if (data.status === 'ok') setCloneStatus(data); })
+ .catch(() => {});
+ }, [voiceProfile]);
+
+ const readiness = voiceStats?.readiness;
+ const samples = voiceStats?.recent_samples || [];
+ const qualityDist = voiceStats?.quality_distribution || {};
+
+ return (
+ <div className="space-y-3">
+ {/* 样本收集进度 */}
+ {readiness && (
+ <div className={`p-3 rounded-lg border ${
+ readiness.status === 'sufficient'
+ ? 'bg-blue-500/10 border-blue-500/30'
+ : readiness.status === 'approaching'
+ ? 'bg-amber-500/10 border-amber-500/30'
+ : 'bg-surface-panel border-line-subtle'
+ }`}>
+ <div className="flex items-center gap-2 mb-1">
+ <div className={`w-2 h-2 rounded-full ${
+ readiness.status === 'sufficient' ? 'bg-blue-400' :
+ readiness.status === 'approaching' ? 'bg-amber-400' : 'bg-surface-base'
+ }`} />
+ <span className={`text-xs font-medium ${
+ readiness.status === 'sufficient' ? 'text-blue-300' :
+ readiness.status === 'approaching' ? 'text-amber-300' : 'text-content-muted'
+ }`}>
+ {readiness.status === 'sufficient' ? '样本收集完成' :
+ readiness.status === 'approaching' ? '采集中' : '数据不足'}
+ </span>
+ <span className="text-xs text-content-muted ml-auto">{Math.round(readiness.score * 100)}%</span>
+ </div>
+ <div className="h-1 bg-surface-overlay rounded-full overflow-hidden mb-1.5">
+ <div
+ className={`h-full rounded-full transition-all duration-700 ${
+ readiness.status === 'sufficient' ? 'bg-blue-500' :
+ readiness.status === 'approaching' ? 'bg-amber-500' : 'bg-surface-base'
+ }`}
+ style={{ width: `${readiness.score * 100}%` }}
+ />
+ </div>
+ <p className="text-[10px] text-content-muted">{readiness.message}</p>
+ {readiness.status === 'sufficient' && (
+ <div className="mt-2 p-2 rounded bg-surface-panel/50 border border-line-subtle/50 space-y-2">
+ {/* 克隆引擎状态 */}
+ {cloneStatus && cloneStatus.engines && (
+ <div className="space-y-1">
+ {cloneStatus.engines.map((engine: any) => (
+ <div key={engine.name} className="flex items-center justify-between text-[10px]">
+ <span className="text-content-muted">
+ {engine.name === 'edge_tts_clone' ? 'EdgeTTS 轻量克隆' :
+ engine.name === 'f5_tts_clone' ? 'F5-TTS 深度克隆' : engine.name}
+ </span>
+ <span className={
+ engine.trained ? 'text-emerald-400' :
+ engine.available ? 'text-amber-400' : 'text-slate-500'
+ }>
+ {engine.trained ? '已训练' :
+ engine.available ? '可用' : '未安装'}
+ </span>
+ </div>
+ ))}
+ </div>
+ )}
+ 
+ {/* 特征摘要 */}
+ {cloneStatus?.features && (
+ <div className="text-[10px] text-content-muted space-y-0.5">
+ <div>语速: <span className="text-content-secondary">{cloneStatus.features.words_per_minute} wpm</span></div>
+ <div>音调: <span className="text-content-secondary">{cloneStatus.features.avg_pitch} Hz</span></div>
+ <div>性别: <span className="text-content-secondary">{cloneStatus.features.inferred_gender}</span></div>
+ </div>
+ )}
+ 
+ <button
+ onClick={async () => {
+ setCheckingClone(true);
+ try {
+ const res = await fetch(`/api/v1/soul/voice/${api.USER_ID}/train_clone`, { method: 'POST' });
+ const data = await res.json();
+ showToast(data.result?.message || '训练完成');
+ // 刷新状态
+ const statusRes = await fetch(`/api/v1/soul/voice/${api.USER_ID}/clone_status`);
+ const statusData = await statusRes.json();
+ if (statusData.status === 'ok') setCloneStatus(statusData);
+ } catch { showToast('训练失败'); }
+ setCheckingClone(false);
+ }}
+ disabled={checkingClone}
+ className="text-[10px] px-2 py-1 bg-blue-600/30 text-blue-300 rounded hover:bg-blue-600/40 transition disabled:opacity-50"
+ >
+ {checkingClone ? '训练中...' : '手动训练克隆模型'}
+ </button>
+ </div>
+ )}
+ </div>
+ )}
+
+ {/* 基本统计 */}
+ <div className="flex items-center justify-between text-sm">
+ <span className="text-content-muted">语音样本</span>
+ <span className="text-indigo-400">{voiceProfile?.sample_count || 0} 段</span>
+ </div>
+ <div className="flex items-center justify-between text-sm">
+ <span className="text-content-muted">总时长</span>
+ <span className="text-indigo-400">{voiceStats?.total_duration_formatted || `${Math.round(voiceProfile?.total_duration_seconds || 0)} 秒`}</span>
+ </div>
+
+ {/* 质量分布 */}
+ {Object.keys(qualityDist).length > 0 && (
+ <div className="mt-2">
+ <div className="text-[10px] text-content-muted mb-1.5">样本质量分布</div>
+ <div className="flex gap-1">
+ {Object.entries(qualityDist).map(([label, count]: [string, any]) => (
+ <div key={label} className="flex-1 text-center">
+ <div className="text-xs font-medium text-content-secondary">{count}</div>
+ <div className="text-[9px] text-content-muted">{label}</div>
+ </div>
+ ))}
+ </div>
+ </div>
+ )}
+
+ {/* 操作按钮 */}
+ <div className="flex gap-2 mt-3">
+ <button
+ onClick={onRecordAudio}
+ className={`flex-1 py-2 rounded-lg text-sm transition ${isRecordingAudio ? 'bg-red-600 text-white animate-pulse' : 'bg-surface-panel hover:bg-surface-overlay text-content-secondary'}`}
+ >
+ {isRecordingAudio ? <><Square className="w-4 h-4 inline" /> 停止录制</> : <><Mic className="w-4 h-4 inline" /> 录制校准音频</>}
+ </button>
+ </div>
+ <p className="text-[10px] text-content-muted">
+ {isRecordingAudio ? '正在录制，最长8秒...' : '录制你的声音样本，用于未来的声纹克隆。建议录制不同情绪、不同语速的片段。'}
+ </p>
+
+ {/* 最近样本 */}
+ {samples.length > 0 && (
+ <div className="mt-2">
+ <div className="text-[10px] text-content-muted mb-1.5">最近样本</div>
+ <div className="space-y-1 max-h-24 overflow-y-auto">
+ {samples.map((s: any) => (
+ <div key={s.id} className="flex items-center justify-between text-[10px] px-2 py-1 bg-surface-panel/50 rounded">
+ <span className="text-content-muted">{s.duration?.toFixed(1)}s</span>
+ <span className={`${s.quality > 0.7 ? 'text-emerald-400' : s.quality > 0.4 ? 'text-amber-400' : 'text-content-muted'}`}>
+ {s.quality > 0.7 ? '高' : s.quality > 0.4 ? '中' : '低'}
+ </span>
+ <span className="text-content-secondary">{s.source}</span>
+ </div>
+ ))}
+ </div>
+ </div>
+ )}
+
+ {/* 说明 */}
+ <div className="p-2.5 rounded-lg bg-surface-panel/50 border border-line-subtle/50">
+ <p className="text-[10px] text-content-muted leading-relaxed">
+ <span className="text-indigo-300 font-medium">当前语音：</span>
+ 使用 edge-tts（微软免费语音）合成。你听到的不是"你的声音"，而是预设的AI声音。
+ </p>
+ <p className="text-[10px] text-content-muted leading-relaxed mt-1">
+ <span className="text-emerald-300 font-medium">未来克隆：</span>
+ 当采集满2小时高质量样本后，可接入 GPT-SoVITS 或 F5-TTS 进行真正的声音克隆。
+ 所有样本已安全存储，换模型时无需重新采集。
+ </p>
+ </div>
+
+ {renderSubProgress('voice')}
+ </div>
+ );
+}
+
+ if (loading) {
+ return (
+ <div className="flex-1 flex items-center justify-center bg-surface-elevated/95">
+ <div className="text-content-primary text-lg animate-pulse">加载灵魂数据中...</div>
+ </div>
+ );
+ }
+
+ return (
+ <div className="h-full flex flex-col bg-surface-elevated text-content-primary relative">
+ {toast && (
+ <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-violet-600 text-white px-4 py-2 rounded-lg text-sm z-50 shadow-lg animate-bounce">
+ {toast}
+ </div>
+ )}
+
+ {/* Test Chat Guide Modal */}
+ {showTestChatGuide && (
+ <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center" onClick={() => setShowTestChatGuide(false)}>
+ <div className="bg-surface-panel border border-line-subtle rounded-2xl p-6 max-w-sm w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+ <div className="flex items-center gap-2 mb-3">
+ <MessageSquare className="w-5 h-5 text-accent" />
+ <h3 className="text-base font-medium text-content-primary">还需要更多数据</h3>
+ </div>
+ <p className="text-sm text-content-secondary mb-4">
+ 当前灵魂完成度 <span className="font-medium text-accent">{Math.round(overall * 100)}%</span>，
+ 达到 <span className="font-medium text-accent">15%</span> 后才能与数字灵魂测试对话。
+ </p>
+ <div className="p-3 rounded-lg bg-surface-overlay mb-4">
+ <div className="text-xs text-content-muted mb-1.5">快速补全建议：</div>
+ <ul className="text-xs text-content-secondary space-y-1">
+ <li className="flex items-start gap-1.5"><span className="text-accent">•</span> 去「人格」tab 手动填写基础信息</li>
+ <li className="flex items-start gap-1.5"><span className="text-accent">•</span> 多聊 3-5 句日常对话，系统自动分析</li>
+ <li className="flex items-start gap-1.5"><span className="text-accent">•</span> 导入微信聊天记录等外部语料</li>
+ </ul>
+ </div>
+ <div className="flex gap-2">
+ <button
+ onClick={() => { setShowTestChatGuide(false); setActiveMainTab('persona'); }}
+ className="flex-1 py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent-hover transition"
+ >
+ 去填写人格画像
+ </button>
+ <button
+ onClick={() => setShowTestChatGuide(false)}
+ className="flex-1 py-2 bg-surface-overlay text-content-secondary rounded-lg text-sm hover:bg-surface-overlay transition"
+ >
+ 稍后再说
+ </button>
+ </div>
+ </div>
+ </div>
+ )}
+
+ {/* 浮动数字人 */}
+ {isAvatarFloating && (
+ <FloatingAvatar
+ emotion={isTestChat && testMessages.length > 0 && testMessages[testMessages.length - 1].role === 'assistant' ? 'happy' : 'calm'}
+ isSpeaking={isTestChat && testMessages.length > 0 && testMessages[testMessages.length - 1].role === 'assistant'}
+ currentSentence={isTestChat ? testMessages[testMessages.length - 1]?.content || null : null}
+ appearanceConfig={avatarConfig || undefined}
+ initialPos={floatInitialPos}
+ onGoHome={() => { setIsAvatarFloating(false); setFloatInitialPos(undefined); }}
+ />
+ )}
+
+ {/* Header */}
+ <div className="h-14 flex items-center justify-between px-6 border-b border-line-subtle shrink-0">
+ <div className="flex items-center gap-3">
+ <Eye className="w-5 h-5 text-accent" />
+ <h2 className="text-content-primary font-bold">灵魂预览室</h2>
+ </div>
+ <div className="flex items-center gap-3">
+ {isTestChat && (
+ <button onClick={() => setIsTestChat(false)} className="text-sm text-content-secondary hover:text-content-primary px-3 py-1.5 rounded-lg hover:bg-surface-panel transition">
+ 退出测试
+ </button>
+ )}
+ </div>
+ </div>
+
+ <div className="flex-1 flex flex-col lg:flex-row overflow-hidden bg-surface-elevated">
+ {/* Left: Preview */}
+ <div className="w-full lg:w-1/2 p-4 lg:p-8 flex flex-col items-center justify-center lg:border-r border-b lg:border-b-0 border-line-subtle shrink-0">
+ {!isTestChat ? (
+ <>
+ {isAvatarFloating ? (
+ <>
+ {/* 空底座状态 */}
+ <div className="w-80 h-80 rounded-full border-2 border-dashed border-line-active flex items-center justify-center mb-6 relative">
+ <div className="text-center">
+ <p className="text-content-muted text-lg mb-4">数字人正在漫游</p>
+ <button
+ onClick={() => setIsAvatarFloating(false)}
+ className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm font-medium transition"
+ >
+ 叫回来
+ </button>
+ </div>
+ </div>
+ <h3 className="text-content-primary text-xl font-medium mb-2">未来的你</h3>
+ {/* 精简完成度进度条 */}
+ <div className="mt-4 w-full max-w-xs group relative">
+ <div className="flex h-2 rounded-full overflow-hidden bg-surface-panel">
+ <div
+ className="h-full bg-accent-subtle transition-all duration-700"
+ style={{ width: `${Math.round(completeness.thought * 100)}%` }}
+ />
+ <div
+ className="h-full bg-indigo-500 transition-all duration-700"
+ style={{ width: `${Math.round(completeness.voice * 100)}%` }}
+ />
+ <div
+ className="h-full bg-fuchsia-500 transition-all duration-700"
+ style={{ width: `${Math.round(completeness.appearance * 100)}%` }}
+ />
+ </div>
+ {/* Tooltip */}
+ <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-xs whitespace-nowrap z-10 shadow-lg">
+ <div className="flex items-center gap-2 mb-1">
+ <span className="w-2 h-2 rounded-full bg-accent-subtle" />
+ <span className="text-content-muted">思维模型</span>
+ <span className="text-accent">{Math.round(completeness.thought * 100)}%</span>
+ </div>
+ <div className="flex items-center gap-2 mb-1">
+ <span className="w-2 h-2 rounded-full bg-indigo-500" />
+ <span className="text-content-muted">声纹模型</span>
+ <span className="text-indigo-400">{Math.round(completeness.voice * 100)}%</span>
+ </div>
+ <div className="flex items-center gap-2">
+ <span className="w-2 h-2 rounded-full bg-fuchsia-500" />
+ <span className="text-content-muted">形象模型</span>
+ <span className="text-fuchsia-400">{Math.round(completeness.appearance * 100)}%</span>
+ </div>
+ </div>
+ </div>
+ <button
+ onClick={() => {
+ if (overall < 0.15) {
+ setShowTestChatGuide(true);
+ } else {
+ setIsTestChat(true);
+ }
+ }}
+ className="mt-6 px-6 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-medium transition"
+ >
+ <MessageSquare className="w-4 h-4 inline" /> 与未来的自己对话（测试）
+ </button>
+ </>
+ ) : (
+ <>
+ <div className="relative mb-6">
+ <div
+ className="w-80 h-80 rounded-full bg-gradient-to-br from-violet-500/20 to-indigo-500/20 flex items-center justify-center ring-2 ring-violet-500/30 relative overflow-hidden cursor-grab active:cursor-grabbing group"
+ onMouseDown={(e) => {
+ const startX = e.clientX;
+ const startY = e.clientY;
+ let dragged = false;
+
+ const onMove = (ev: MouseEvent) => {
+ const dx = ev.clientX - startX;
+ const dy = ev.clientY - startY;
+ if (Math.sqrt(dx * dx + dy * dy) > 15) {
+ dragged = true;
+ }
+ };
+ const onUp = (ev: MouseEvent) => {
+ window.removeEventListener('mousemove', onMove);
+ window.removeEventListener('mouseup', onUp);
+ if (dragged) {
+ setFloatInitialPos({ x: ev.clientX - 70, y: ev.clientY - 70 });
+ setIsAvatarFloating(true);
+ }
+ };
+ window.addEventListener('mousemove', onMove);
+ window.addEventListener('mouseup', onUp);
+ }}
+ title="按住拖拽到屏幕上"
+ >
+ <CanvasAvatar
+ emotion={isTestChat ? 'happy' : 'calm'}
+ isSpeaking={isTestChat && testMessages.length > 0 && testMessages[testMessages.length - 1].role === 'assistant'}
+ currentSentence={isTestChat ? testMessages[testMessages.length - 1]?.content || null : null}
+ size={320}
+ animated={true}
+ showParticles={true}
+ scale={1.2}
+ />
+ {/* 拖拽提示 */}
+ <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+ <div className="px-3 py-1.5 rounded-full bg-black/40 text-white text-xs backdrop-blur">
+ 按住拖拽放出
+ </div>
+ </div>
+ {/* 首次引导脉冲 */}
+ {dragGuideVisible && (
+ <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+ <div className="absolute w-full h-full rounded-full border-2 border-accent/60 animate-ping" style={{animationDuration: '2s'}} />
+ <div className="absolute w-[110%] h-[110%] rounded-full border border-accent/30 animate-ping" style={{animationDuration: '2s', animationDelay: '0.5s'}} />
+ </div>
+ )}
+ </div>
+ {/* 显式放出按钮 + 引导文案 */}
+ <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 translate-y-full flex flex-col items-center gap-2">
+ {dragGuideVisible && (
+ <p className="text-xs text-accent animate-pulse whitespace-nowrap">拖拽头像或点击按钮，释放你的数字灵魂</p>
+ )}
+ <button
+ onClick={() => setIsAvatarFloating(true)}
+ className="px-4 py-2 rounded-full bg-accent-subtle text-accent border border-accent-border hover:bg-accent hover:text-white transition text-xs font-medium flex items-center gap-1.5"
+ >
+ <Sparkles className="w-3.5 h-3.5" />
+ 放出数字人
+ </button>
+ </div>
+ </div>
+ <h3 className="text-content-primary text-xl font-medium mb-2">未来的你</h3>
+ {overall < 0.15 ? (
+ <div className="text-sm text-content-muted text-center max-w-sm space-y-2">
+ <p>数据不足，需要更多互动来构建你的数字灵魂。</p>
+ <div className="p-3 rounded-lg bg-surface-panel/60 border border-line-subtle/50 text-left space-y-1.5">
+ <div className="text-[11px] text-content-muted font-medium">下一步建议：</div>
+ <div className="flex items-start gap-2">
+ <span className="w-4 h-4 rounded-full bg-accent-subtle/20 text-accent text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+ <span className="text-xs text-content-muted">在右侧填写基本信息和人格画像</span>
+ </div>
+ <div className="flex items-start gap-2">
+ <span className="w-4 h-4 rounded-full bg-accent-subtle/20 text-accent text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+ <span className="text-xs text-content-muted">多进行几次对话，系统会自动分析你的特征</span>
+ </div>
+ <div className="flex items-start gap-2">
+ <span className="w-4 h-4 rounded-full bg-accent-subtle/20 text-accent text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+ <span className="text-xs text-content-muted">导入微信聊天记录加速人格构建</span>
+ </div>
+ </div>
+ </div>
+ ) : overall < 0.5 ? (
+ <p className="text-content-muted text-sm text-center max-w-sm">轮廓渐显，继续对话和采集让形象更清晰。</p>
+ ) : overall < 0.8 ? (
+ <p className="text-content-muted text-sm text-center max-w-sm">形象已清晰化，可以进行测试对话了。</p>
+ ) : (
+ <p className="text-content-muted text-sm text-center max-w-sm">数字灵魂已成型，你已准备好延续给后人。</p>
+ )}
+ {/* 精简完成度进度条 */}
+ <div className="mt-4 w-full max-w-xs group relative">
+ <div className="flex h-2 rounded-full overflow-hidden bg-surface-panel">
+ <div
+ className="h-full bg-accent-subtle transition-all duration-700"
+ style={{ width: `${Math.round(completeness.thought * 100)}%` }}
+ />
+ <div
+ className="h-full bg-indigo-500 transition-all duration-700"
+ style={{ width: `${Math.round(completeness.voice * 100)}%` }}
+ />
+ <div
+ className="h-full bg-fuchsia-500 transition-all duration-700"
+ style={{ width: `${Math.round(completeness.appearance * 100)}%` }}
+ />
+ </div>
+ {/* Tooltip */}
+ <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-xs whitespace-nowrap z-10 shadow-lg">
+ <div className="flex items-center gap-2 mb-1">
+ <span className="w-2 h-2 rounded-full bg-accent-subtle" />
+ <span className="text-content-muted">思维模型</span>
+ <span className="text-accent">{Math.round(completeness.thought * 100)}%</span>
+ </div>
+ <div className="flex items-center gap-2 mb-1">
+ <span className="w-2 h-2 rounded-full bg-indigo-500" />
+ <span className="text-content-muted">声纹模型</span>
+ <span className="text-indigo-400">{Math.round(completeness.voice * 100)}%</span>
+ </div>
+ <div className="flex items-center gap-2">
+ <span className="w-2 h-2 rounded-full bg-fuchsia-500" />
+ <span className="text-content-muted">形象模型</span>
+ <span className="text-fuchsia-400">{Math.round(completeness.appearance * 100)}%</span>
+ </div>
+ </div>
+ </div>
+ <button
+ onClick={() => {
+ if (overall < 0.15) {
+ setShowTestChatGuide(true);
+ } else {
+ setIsTestChat(true);
+ }
+ }}
+ className="mt-6 px-6 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-medium transition"
+ >
+ <MessageSquare className="w-4 h-4 inline" /> 与未来的自己对话（测试）
+ </button>
+ </>
+ )}
+ </>
+ ) : (
+ <div className="w-full max-w-lg h-full flex flex-col">
+ <h3 className="text-content-primary font-bold mb-4"><MessageSquare className="w-5 h-5 inline" /> 测试对话模式</h3>
+ {matchScore && (
+ <div className="mb-3 p-4 rounded-xl bg-surface-panel/80 border border-violet-500/20">
+ <div className="flex items-center gap-4 mb-3">
+ <div className="relative w-16 h-16 shrink-0">
+ <svg className="w-16 h-16 -rotate-90" viewBox="0 0 36 36">
+ <path className="text-content-secondary" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="3" />
+ <path className="text-accent transition-all duration-700" strokeDasharray={`${matchScore.overall * 100}, 100`} d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="3" />
+ </svg>
+ <div className="absolute inset-0 flex items-center justify-center">
+ <span className="text-sm font-bold text-content-primary">{Math.round(matchScore.overall * 100)}%</span>
+ </div>
+ </div>
+ <div>
+ <div className="text-xs text-content-muted">灵魂匹配度</div>
+ <div className="text-sm text-content-secondary mt-0.5">
+ {matchScore.overall > 0.8 ? <>非常像你了 <Target className="w-4 h-4 inline" /></> :
+ matchScore.overall > 0.6 ? <>越来越像了 <ThumbsUp className="w-4 h-4 inline" /></> :
+ matchScore.overall > 0.4 ? <>轮廓渐显 <Sprout className="w-4 h-4 inline" /></> :
+ <>还需要更多对话 <FileText className="w-4 h-4 inline" /></>}
+ </div>
+ </div>
+ </div>
+ </div>
+ )}
+ {/* 匹配度历史 */}
+ {matchHistory.length > 0 && (
+ <div className="mb-3 flex gap-1.5 overflow-x-auto pb-1">
+ {matchHistory.map((h, i) => (
+ <div key={i} className="shrink-0 px-2 py-1 rounded-md bg-surface-panel/80 border border-line-subtle/50 text-[10px]">
+ <span className={`${h.overall > 0.6 ? 'text-emerald-400' : h.overall > 0.4 ? 'text-amber-400' : 'text-content-muted'}`}>
+ {Math.round(h.overall * 100)}%
+ </span>
+ <span className="text-content-secondary ml-1">{h.question}...</span>
+ </div>
+ ))}
+ </div>
+ )}
+ <div className="flex-1 overflow-y-auto bg-surface-panel/50 rounded-xl p-4 space-y-3 mb-4">
+ {testMessages.length === 0 && (
+ <div className="text-content-muted text-sm text-center">你好，我是基于你当前人格画像构建的"未来的你"。试着问我一个问题。</div>
+ )}
+ {testMessages.map((m, i) => (
+ <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+ <div className={`${m.role === 'user' ? 'bg-violet-600 text-white' : 'bg-surface-overlay text-content-primary'} px-3 py-2 rounded-lg text-sm max-w-xs`}>
+ {m.content}
+ </div>
+ </div>
+ ))}
+ {testChatLoading && (
+ <div className="flex justify-start">
+ <div className="bg-surface-overlay text-content-secondary px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+ <div className="w-4 h-4 border-2 border-line-active border-t-violet-400 rounded-full animate-spin" />
+ 思考中...
+ </div>
+ </div>
+ )}
+ </div>
+ <div className="flex gap-2">
+ <input
+ value={testInput}
+ onChange={(e) => setTestInput(e.target.value)}
+ onKeyDown={(e) => e.key === 'Enter' && handleTestChat()}
+ placeholder="输入问题..."
+ disabled={testChatLoading}
+ className="flex-1 bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-muted focus:outline-none focus:border-violet-500 disabled:opacity-50"
+ />
+ <button onClick={handleTestChat} disabled={testChatLoading} className="px-4 py-2 bg-violet-600 text-white rounded-lg text-sm hover:bg-violet-700 transition disabled:opacity-50">
+ {testChatLoading ? '...' : '发送'}
+ </button>
+ </div>
+ </div>
+ )}
+ </div>
+
+ {/* Right: Correction Panel */}
+ <div className="w-full lg:w-1/2 p-4 lg:p-8 overflow-y-auto relative">
+ {/* Main Tabs */}
+ <div className="flex gap-1 mb-6 sticky top-0 bg-surface-elevated/95 backdrop-blur z-10 pb-2 border-b border-line-subtle/50">
+ {[
+ { key: 'persona' as const, label: '人格', icon: Sparkles },
+ { key: 'appearance' as const, label: '形象', icon: User },
+ { key: 'voice' as const, label: '声音', icon: Mic },
+ { key: 'will' as const, label: '遗嘱', icon: ScrollText },
+ ].map((tab) => (
+ <button
+ key={tab.key}
+ onClick={() => setActiveMainTab(tab.key)}
+ className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition ${activeMainTab === tab.key ? 'bg-violet-600 text-white' : 'text-content-muted hover:text-content-primary hover:bg-surface-panel'}`}
+ >
+ <tab.icon className="w-4 h-4" />
+ {tab.label}
+ </button>
+ ))}
+ </div>
+
+ <div className="space-y-8 max-w-lg">
+ {activeMainTab === 'persona' && (
+ <>
+ {/* Persona Profile —— 新增核心模块 */}
+ <section>
+ <h4 className="text-content-primary font-medium mb-4 flex items-center gap-2">
+ <Sparkles className="w-5 h-5 text-accent" /> 人格画像（自然语言描述）
+ </h4>
+ <div className="p-4 rounded-xl bg-surface-panel/60 border border-line-subtle/50">
+ <PersonaDisplay />
+ </div>
+ </section>
+
+ {/* External Corpus Import */}
+ <section>
+ <h4 className="text-content-primary font-medium mb-4 flex items-center gap-2">
+ <Upload className="w-5 h-5 text-emerald-400" /> 导入外部语料
+ </h4>
+ <div className="p-4 rounded-xl bg-surface-panel/60 border border-line-subtle/50">
+ <p className="text-xs text-content-muted mb-3">
+ 导入微信聊天记录、邮件、日记等生前语料，系统会自动提取人格特征并更新记忆库。
+ </p>
+ <ExternalCorpusImporter userId={api.USER_ID} onImportSuccess={rebuildPersona} />
+ </div>
+ </section>
+
+ {/* Legacy Mind (保留数值画像作为补充) */}
+ <section>
+ <h4 className="text-content-primary font-medium mb-4 flex items-center gap-2"><Brain className="w-5 h-5" /> 基础画像（数值补充）</h4>
+ <div className="space-y-4">
+ {/* Soul Dimensions 雷达图式展示 */}
+ {soulDimensions && (
+ <div className="p-3 rounded-lg bg-surface-panel/50 border border-line-subtle/50">
+ <div className="text-xs text-content-muted mb-2">人格维度分析</div>
+ <div className="grid grid-cols-2 gap-2">
+ {Object.entries(soulDimensions).map(([key, val]) => {
+ const labels: Record<string, string> = {
+ formality: '正式程度', humor: '幽默感', verbosity: '健谈度',
+ proactivity: '主动性', empathy: '共情力', directness: '直接度',
+ creativity: '创造力', precision: '精确度',
+ };
+ const pct = Math.round((val as number) * 100);
+ return (
+ <div key={key} className="flex items-center gap-2">
+ <span className="text-[10px] text-content-muted w-12">{labels[key] || key}</span>
+ <div className="flex-1 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
+ <div className="h-full bg-fuchsia-500/70 rounded-full transition-all" style={{ width: `${pct}%` }} />
+ </div>
+ <span className="text-[10px] text-fuchsia-400 w-6 text-right">{pct}%</span>
+ </div>
+ );
+ })}
+ </div>
+ </div>
+ )}
+ <div>
+ <div className="flex justify-between text-sm mb-1">
+ <span className="text-content-muted">决策风格</span>
+ <span className="text-fuchsia-400">{decision < 0.33 ? '保守' : decision < 0.66 ? '平衡' : '冒险'}</span>
+ </div>
+ <input type="range" min="0" max="1" step="0.05" value={decision} onChange={(e) => setDecision(parseFloat(e.target.value))} className="w-full accent-fuchsia-500" />
+ </div>
+ <div>
+ <div className="flex justify-between text-sm mb-1">
+ <span className="text-content-muted">语言风格</span>
+ <span className="text-fuchsia-400">{language < 0.33 ? '随意' : language < 0.66 ? '平衡' : '正式'}</span>
+ </div>
+ <input type="range" min="0" max="1" step="0.05" value={language} onChange={(e) => setLanguage(parseFloat(e.target.value))} className="w-full accent-fuchsia-500" />
+ </div>
+ <div>
+ <label className="text-sm text-content-muted block mb-1">核心价值观（用逗号分隔）</label>
+ <input type="text" value={coreValues} onChange={(e) => setCoreValues(e.target.value)} placeholder="家庭、正直、创新..." className="w-full bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-muted focus:outline-none focus:border-fuchsia-500" />
+ </div>
+ <button onClick={saveMindProfile} disabled={saving} className="w-full py-2 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded-lg text-sm font-medium transition disabled:opacity-50">
+ {saving ? '保存中...' : '保存基础画像'}
+ </button>
+ {renderSubProgress('thought')}
+ </div>
+ </section>
+ </>
+ )}
+
+ {activeMainTab === 'appearance' && (
+ <>
+ {/* Appearance */}
+ <section>
+ <h4 className="text-content-primary font-medium mb-4 flex items-center gap-2"><User className="w-5 h-5" /> 形象修正</h4>
+ <div className="space-y-3">
+ <div className="flex items-center justify-between text-sm">
+ <span className="text-content-muted">照片样本</span>
+ <span className="text-accent">{avatarStats?.photo_count ?? appearanceProfile?.photo_count ?? 0} 张</span>
+ </div>
+ <div className="flex items-center justify-between text-sm">
+ <span className="text-content-muted">视频样本</span>
+ <span className="text-accent">{avatarStats?.video_count ?? appearanceProfile?.video_count ?? 0} 段</span>
+ </div>
+ {avatarStats?.face_detected_count > 0 && (
+ <div className="flex items-center justify-between text-sm">
+ <span className="text-content-muted">检测到人脸</span>
+ <span className="text-emerald-400">{avatarStats.face_detected_count} 张</span>
+ </div>
+ )}
+ <div className="flex gap-2 mt-3">
+ <label className="flex-1 py-2 bg-surface-panel hover:bg-surface-overlay text-content-secondary rounded-lg text-sm transition text-center cursor-pointer">
+ <input type="file" accept="image/*" className="hidden" onChange={handleUploadPhoto} />
+ 上传参考照片
+ </label>
+ </div>
+ {photoPreviews.length > 0 && (
+ <div className="mt-3 grid grid-cols-3 gap-2">
+ {photoPreviews.map((url, idx) => (
+ <div key={idx} className="relative aspect-square rounded-lg overflow-hidden border border-line-subtle">
+ <img src={url} alt={`参考照片 ${idx + 1}`} className="w-full h-full object-cover" />
+ <div className="absolute top-1 left-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded">{idx + 1}</div>
+ </div>
+ ))}
+ </div>
+ )}
+
+ {/* 样本收集进度 */}
+ {avatarStats && (
+ <div className="p-2.5 rounded-lg bg-surface-panel/50 border border-line-subtle/50">
+ <div className="flex items-center gap-2 mb-1">
+ <div className={`w-2 h-2 rounded-full ${
+ (avatarStats.collection_progress || 0) >= 1 ? 'bg-blue-400' :
+ (avatarStats.collection_progress || 0) >= 0.5 ? 'bg-amber-400' : 'bg-surface-base'
+ }`} />
+ <span className="text-[10px] text-content-muted">
+ 样本收集进度 {Math.round((avatarStats.collection_progress || 0) * 100)}%
+ </span>
+ </div>
+ <div className="h-1 bg-surface-overlay rounded-full overflow-hidden">
+ <div
+ className={`h-full rounded-full transition-all ${
+ (avatarStats.collection_progress || 0) >= 1 ? 'bg-blue-500' :
+ (avatarStats.collection_progress || 0) >= 0.5 ? 'bg-amber-500' : 'bg-surface-base'
+ }`}
+ style={{ width: `${(avatarStats.collection_progress || 0) * 100}%` }}
+ />
+ </div>
+ <p className="text-[10px] text-content-muted mt-1">
+ {(avatarStats.collection_progress || 0) >= 1
+ ? '照片样本充足。当前为 Phase 2（颜色提取），3D 重建需 Phase 3 GPU 环境。'
+ : '建议上传 3-5 张不同角度的正面照'}
+ </p>
+ </div>
+ )}
+
+ {/* Avatar 外观配置 */}
+ <div className="mt-4 p-3 rounded-xl bg-surface-panel/50 border border-line-subtle/50">
+ <div className="flex items-center gap-2 mb-3">
+ <Palette className="w-4 h-4 text-accent" />
+ <span className="text-sm text-content-secondary">外观个性化</span>
+ {avatarConfig && <span className="text-[10px] text-blue-400">已配色</span>}
+ </div>
+
+ {/* 实时预览 */}
+ <div className="flex justify-center mb-3">
+ <CanvasAvatar
+ emotion={avatarPreviewEmotion}
+ size={120}
+ appearanceConfig={avatarConfig || undefined}
+ currentSentence="你好，我是你的数字灵魂"
+ isSpeaking={avatarPreviewEmotion === 'happy'}
+ animated={true}
+ />
+ </div>
+
+ {/* 情绪预览切换 */}
+ <div className="flex gap-1 mb-3 justify-center">
+ {['neutral', 'happy', 'sad', 'thinking', 'surprised'].map((emo) => (
+ <button
+ key={emo}
+ onClick={() => setAvatarPreviewEmotion(emo)}
+ className={`text-[10px] px-2 py-1 rounded-md transition ${
+ avatarPreviewEmotion === emo
+ ? 'bg-violet-600 text-white'
+ : 'bg-surface-overlay text-content-muted hover:bg-surface-overlay'
+ }`}
+ >
+ {emo === 'neutral' ? '平静' : emo === 'happy' ? '开心' : emo === 'sad' ? '悲伤' : emo === 'thinking' ? '思考' : '惊讶'}
+ </button>
+ ))}
+ </div>
+
+ {/* 颜色调节 */}
+ <ColorSlider
+ label="肤色"
+ colors={['#f5e6d8', '#e8d4c4', '#d4a574', '#c68642', '#8d5524', '#f8e8d8', '#ffdbac']}
+ value={avatarConfig?.skin?.base || '#f5e6d8'}
+ onChange={(color) => {
+ const newConfig: AppearanceConfig = {
+ ...avatarConfig,
+ skin: {
+ base: color,
+ shadow: shadeHex(color, -15),
+ highlight: shadeHex(color, 15),
+ blush: shadeHex(color, 20),
+ },
+ };
+ setAvatarConfig(newConfig);
+ api.setAvatarConfig(newConfig).catch(() => {});
+ }}
+ />
+ <ColorSlider
+ label="发色"
+ colors={['#4ecdc4', '#2d8a82', '#1a1a2e', '#3d2314', '#8b4513', '#c0c0c0', '#ffd700', '#ff6b6b']}
+ value={avatarConfig?.hair?.base || '#4ecdc4'}
+ onChange={(color) => {
+ const newConfig: AppearanceConfig = {
+ ...avatarConfig,
+ hair: {
+ base: color,
+ dark: shadeHex(color, -25),
+ light: shadeHex(color, 20),
+ },
+ };
+ setAvatarConfig(newConfig);
+ api.setAvatarConfig(newConfig).catch(() => {});
+ }}
+ />
+ <ColorSlider
+ label="眼睛"
+ colors={['#2d6a4f', '#4a7c59', '#5b8a72', '#3d5a80', '#5c4d7d', '#8b4513', '#4a4a4a']}
+ value={avatarConfig?.eyes?.iris || '#2d6a4f'}
+ onChange={(color) => {
+ const newConfig: AppearanceConfig = {
+ ...avatarConfig,
+ eyes: {
+ iris: color,
+ pupil: '#0f172a',
+ highlight: '#ffffff',
+ },
+ };
+ setAvatarConfig(newConfig);
+ api.setAvatarConfig(newConfig).catch(() => {});
+ }}
+ />
+
+ <p className="text-[10px] text-content-muted mt-2">
+ 上传照片后系统会自动提取颜色。你也可以手动调整，数字灵魂会实时更新。
+ </p>
+ </div>
+
+ {renderSubProgress('appearance')}
+ </div>
+ </section>
+
+ </>
+ )}
+
+ {activeMainTab === 'voice' && (
+ <>
+ <section>
+ <h4 className="text-content-primary font-medium mb-4 flex items-center gap-2"><Mic className="w-5 h-5" /> 声音修正</h4>
+ <VoiceProfileDisplay
+                  voiceProfile={voiceProfile}
+                  isRecordingAudio={isRecordingAudio}
+                  onRecordAudio={handleRecordAudio}
+                  showToast={showToast}
+                  renderSubProgress={renderSubProgress}
+                />
+ </section>
+ </>
+ )}
+
+ {activeMainTab === 'will' && (
+ <>
+ {/* Death Event Management */}
+ <section>
+ <h4 className="text-content-primary font-medium mb-4 flex items-center gap-2">
+ <Shield className="w-5 h-5 text-amber-400" /> 死亡事件标记
+ </h4>
+ <div className="p-4 rounded-xl bg-surface-panel/60 border border-line-subtle/50">
+ <DeathEventPanel userId={api.USER_ID} />
+ </div>
+ </section>
+
+ {/* Will */}
+ <section>
+ <h4 className="text-content-primary font-medium mb-4 flex items-center gap-2"><ScrollText className="w-5 h-5" /> 遗嘱与延续</h4>
+ <div className="space-y-3">
+ <div className="p-3 rounded-xl bg-accent-subtle/10 border border-violet-500/20">
+ <div className="text-xs text-violet-300 mb-1.5 font-medium"><Lightbulb className="w-3 h-3 inline" /> 什么是数字延续？</div>
+ <p className="text-[11px] text-content-muted leading-relaxed">
+ 当你离世后，你的数字灵魂将继续存在。家属可以通过验证进入永恒模式，与你的数字灵魂对话——
+ 它会用你生前的思维方式、说话习惯、甚至关心的话题来回应。只要系统在，你就永远在。
+ </p>
+ </div>
+ <div>
+ <div className="flex items-center justify-between mb-1.5">
+ <label className="text-sm text-content-muted">继承人</label>
+ <button
+ onClick={() => setHeirs([...heirs, { name: '', relationship: '', id: `heir_${Date.now()}` }])}
+ className="text-[10px] px-2 py-0.5 rounded-md bg-accent-subtle/20 text-violet-300 hover:bg-accent-subtle/30 transition"
+ >
+ + 添加
+ </button>
+ </div>
+ {heirs.length === 0 && (
+ <div className="text-xs text-content-muted py-2">尚未设置继承人</div>
+ )}
+ <div className="space-y-2">
+ {heirs.map((h, idx) => (
+ <div key={h.id} className="flex gap-2">
+ <input type="text" value={h.name} onChange={(e) => { const next = [...heirs]; next[idx].name = e.target.value; setHeirs(next); }} placeholder="姓名" className="flex-1 bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-muted focus:outline-none focus:border-violet-500" />
+ <input type="text" value={h.relationship} onChange={(e) => { const next = [...heirs]; next[idx].relationship = e.target.value; setHeirs(next); }} placeholder="关系" className="w-24 bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-muted focus:outline-none focus:border-violet-500" />
+ <button onClick={() => { if (confirm(`确定移除继承人「${h.name || '未命名'}」吗？`)) setHeirs(heirs.filter((_, i) => i !== idx)); }} className="px-2 text-content-muted hover:text-red-400 transition" title="删除"><X className="w-4 h-4" /></button>
+ </div>
+ ))}
+ </div>
+ </div>
+ <div>
+ <label className="text-sm text-content-muted block mb-1">留给家人的话（告别信）</label>
+ <textarea value={farewellLetter} onChange={(e) => setFarewellLetter(e.target.value)} placeholder="当你看到这段话时，我已经不在人世了。但我想让你知道..." rows={6} className="w-full bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-muted focus:outline-none focus:border-violet-500 resize-none" />
+ </div>
+ <div>
+ <label className="text-sm text-content-muted block mb-1">访问验证码（可选）</label>
+ <input type="text" value={accessCode} onChange={(e) => setAccessCode(e.target.value.slice(0, 6))} placeholder="4-6 位数字" className="w-full bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-muted focus:outline-none focus:border-violet-500" />
+ </div>
+ <div>
+ <label className="text-sm text-content-muted block mb-1">可问主题</label>
+ <select value={topicMode} onChange={(e) => setTopicMode(e.target.value)} className="w-full bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary focus:outline-none focus:border-violet-500">
+ <option value="all">全部主题</option>
+ <option value="custom">自定义白名单</option>
+ </select>
+ {topicMode === 'custom' && (
+ <div className="mt-2">
+ <input type="text" value={topicWhitelist} onChange={(e) => setTopicWhitelist(e.target.value)} placeholder="用逗号分隔，如：家庭, 人生建议, 职业规划" className="w-full bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-muted focus:outline-none focus:border-violet-500" />
+ </div>
+ )}
+ </div>
+ <div>
+ <label className="text-sm text-content-muted block mb-1">激活条件</label>
+ <select value={activation} onChange={(e) => setActivation(e.target.value)} className="w-full bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-sm text-content-primary focus:outline-none focus:border-violet-500">
+ <option value="after_death">离世后自动激活</option>
+ <option value="specific_date">指定日期</option>
+ </select>
+ </div>
+ <button onClick={saveWillSettings} disabled={saving} className="w-full py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm font-medium transition disabled:opacity-50">
+ {saving ? '保存中...' : '保存遗嘱设置'}
+ </button>
+
+ {/* Data Export */}
+ <button
+ onClick={async () => {
+ try {
+ const res = await fetch(`/api/v1/soul/export/${api.USER_ID}`);
+ const data = await res.json();
+ if (data.status === 'ok') {
+ const blob = new Blob([JSON.stringify(data.data, null, 2)], { type: 'application/json' });
+ const url = URL.createObjectURL(blob);
+ const a = document.createElement('a');
+ a.href = url;
+ a.download = `soul_backup_${api.USER_ID}_${new Date().toISOString().slice(0,10)}.json`;
+ a.click();
+ URL.revokeObjectURL(url);
+ showToast('数据已导出');
+ }
+ } catch {
+ showToast('导出失败');
+ }
+ }}
+ className="w-full py-2 bg-surface-overlay hover:bg-surface-overlay text-content-secondary rounded-lg text-xs font-medium transition"
+ >
+ <Save className="w-4 h-4 inline" /> 导出灵魂数据备份
+ </button>
+
+ {/* Eternal Link */}
+ <div className="pt-2 border-t border-line-subtle/50">
+ <div className="text-xs text-content-muted mb-2">继承链接</div>
+ <div className="flex gap-2">
+ <input readOnly value={`${window.location.origin}/eternal/${api.USER_ID}`} className="flex-1 bg-surface-panel border border-line-subtle rounded-lg px-3 py-2 text-xs text-content-muted" />
+ <button
+ onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/eternal/${api.USER_ID}`); setEternalLinkCopied(true); setTimeout(() => setEternalLinkCopied(false), 2000); }}
+ className="px-3 py-2 bg-surface-overlay hover:bg-surface-overlay text-content-primary rounded-lg text-xs font-medium transition"
+ >
+ {eternalLinkCopied ? <><Check className="w-4 h-4 inline" /> 已复制</> : '复制链接'}
+ </button>
+ </div>
+ </div>
+
+ <div className="flex gap-2 mt-2">
+ <button
+ onClick={async () => {
+ if (!confirm('激活遗嘱将进入测试模式，继承人可立即访问。\n\n确定要激活吗？')) return;
+ try {
+ const res = await fetch(`/api/v1/soul/will/${api.USER_ID}/activate`, { method: 'POST' });
+ const data = await res.json();
+ showToast(data.activated ? '遗嘱已激活（测试模式）' : '激活失败');
+ } catch (e: any) {
+ showToast('激活失败: ' + e.message);
+ }
+ }}
+ className="flex-1 py-2 bg-surface-overlay hover:bg-amber-500/10 text-amber-500 border border-amber-500/30 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1"
+ >
+ <Zap className="w-4 h-4" /> 激活遗嘱（测试）
+ </button>
+ <button
+ onClick={() => window.open(`/eternal/${api.USER_ID}`, '_blank')}
+ className="flex-1 py-2 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition"
+ >
+ <Eye className="w-4 h-4 inline" /> 预览永恒模式
+ </button>
+ </div>
+ </div>
+ </section>
+ </>
+ )}
+ </div>
+
+ {/* Sticky bottom action bar */}
+ {editingPersona && activeMainTab === 'persona' && (
+ <div className="sticky bottom-0 left-0 right-0 bg-surface-elevated/95 backdrop-blur-sm border-t border-line-subtle/50 py-3 px-4 -mx-4 lg:-mx-8 mt-4 flex items-center justify-end gap-2 z-20">
+ <button
+ onClick={() => { setEditingPersona(false); if (personaProfile) setPersonaEdits(personaProfile); }}
+ className="text-xs px-4 py-2 rounded-lg bg-surface-overlay text-content-secondary hover:bg-surface-overlay transition"
+ >
+ 取消
+ </button>
+ <button
+ onClick={savePersonaEdits}
+ disabled={saving}
+ className="text-xs px-4 py-2 rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition disabled:opacity-50"
+ >
+ {saving ? '保存中...' : '保存修正'}
+ </button>
+ </div>
+ )}
+ </div>
+ </div>
+ </div>
+ );
+}
+
+// 子组件：人格字段展示/编辑
+const PersonaField = React.memo(function PersonaField({
+ label, value, fieldKey, editing, edits, onEdit,
+}: {
+ label: string;
+ value?: string;
+ fieldKey: string;
+ editing: boolean;
+ edits: Partial<PersonaProfileData>;
+ onEdit: (v: Partial<PersonaProfileData>) => void;
+}) {
+ const editedValue = fieldKey in edits ? (edits as any)[fieldKey] : undefined;
+ return (
+ <div className="border-b border-line-subtle/30 pb-3 last:border-0">
+ <div className="text-xs text-content-muted mb-1">{label}</div>
+ {editing ? (
+ <textarea
+ value={editedValue !== undefined ? editedValue : (value || '')}
+ onChange={(e) => onEdit({ ...edits, [fieldKey]: e.target.value })}
+ rows={2}
+ className="w-full bg-surface-elevated border border-line rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-disabled focus:outline-none focus:border-accent resize-none"
+ placeholder={`描述你的${label}...`}
+ />
+ ) : (
+ <p className="text-sm text-content-secondary leading-relaxed">{value || <span className="text-content-secondary italic">未记录</span>}</p>
+ )}
+ </div>
+ );
+}, (prev, next) => {
+ return prev.editing === next.editing &&
+        prev.value === next.value &&
+        prev.fieldKey === next.fieldKey &&
+        (prev.edits as any)[prev.fieldKey] === (next.edits as any)[next.fieldKey];
+});
+
+// 子组件：短字段展示/编辑（用于基本信息）
+const PersonaShortField = React.memo(function PersonaShortField({
+ label, value, fieldKey, editing, edits, onEdit, type = 'text',
+}: {
+ label: string;
+ value?: string;
+ fieldKey: string;
+ editing: boolean;
+ edits: Partial<PersonaProfileData>;
+ onEdit: (v: Partial<PersonaProfileData>) => void;
+ type?: 'text' | 'number';
+}) {
+ const editedValue = fieldKey in edits ? (edits as any)[fieldKey] : undefined;
+ return (
+ <div>
+ <div className="text-xs text-content-muted mb-1">{label}</div>
+ {editing ? (
+ <input
+ type={type}
+ value={editedValue !== undefined ? editedValue : (value || '')}
+ onChange={(e) => onEdit({ ...edits, [fieldKey]: e.target.value })}
+ className="w-full bg-surface-elevated border border-line rounded-lg px-3 py-2 text-sm text-content-primary placeholder-content-disabled focus:outline-none focus:border-accent"
+ placeholder={label}
+ />
+ ) : (
+ <p className="text-sm text-content-secondary">{value || <span className="text-content-secondary italic">未记录</span>}</p>
+ )}
+ </div>
+ );
+}, (prev, next) => {
+ return prev.editing === next.editing &&
+        prev.value === next.value &&
+        prev.fieldKey === next.fieldKey &&
+        prev.type === next.type &&
+        (prev.edits as any)[prev.fieldKey] === (next.edits as any)[next.fieldKey];
+});
+
+// 子组件：标签列表展示/编辑
+const PersonaTagList = React.memo(function PersonaTagList({
+ label, items, fieldKey, editing, edits, onEdit, color = 'violet',
+}: {
+ label: string;
+ items: string[];
+ fieldKey: string;
+ editing: boolean;
+ edits: Partial<PersonaProfileData>;
+ onEdit: (v: Partial<PersonaProfileData>) => void;
+ color?: 'violet' | 'amber' | 'slate' | 'emerald' | 'rose';
+}) {
+ const colorMap: Record<string, { bg: string; text: string; border: string }> = {
+ violet: { bg: 'bg-violet-500/20', text: 'text-violet-300', border: 'border-violet-500/30' },
+ amber: { bg: 'bg-amber-500/20', text: 'text-amber-300', border: 'border-amber-500/30' },
+ slate: { bg: 'bg-slate-500/20', text: 'text-slate-300', border: 'border-slate-500/30' },
+ emerald: { bg: 'bg-emerald-500/20', text: 'text-emerald-300', border: 'border-emerald-500/30' },
+ rose: { bg: 'bg-rose-500/20', text: 'text-rose-300', border: 'border-rose-500/30' },
+ };
+ const c = colorMap[color] || colorMap.violet;
+
+ const editedValue = fieldKey in edits ? (edits as any)[fieldKey] : undefined;
+ const currentItems = editing
+ ? (() => {
+ if (Array.isArray(editedValue)) return editedValue;
+ try { return JSON.parse(editedValue || '[]'); } catch { return items; }
+ })()
+ : items;
+
+ const [inputVal, setInputVal] = useState('');
+
+ const addItem = () => {
+ if (!inputVal.trim()) return;
+ const newItems = [...currentItems, inputVal.trim()];
+ const rawValue = fieldKey in edits ? (edits as any)[fieldKey] : undefined;
+ onEdit({ ...edits, [fieldKey]: Array.isArray(rawValue) ? newItems : JSON.stringify(newItems) });
+ setInputVal('');
+ };
+
+ const removeItem = (idx: number) => {
+ const newItems = currentItems.filter((_: any, i: number) => i !== idx);
+ const rawValue = fieldKey in edits ? (edits as any)[fieldKey] : undefined;
+ onEdit({ ...edits, [fieldKey]: Array.isArray(rawValue) ? newItems : JSON.stringify(newItems) });
+ };
+
+ if (!items.length && !editing) return null;
+
+ return (
+ <div className="border-b border-line-subtle/30 pb-3 last:border-0">
+ <div className="text-xs text-content-muted mb-2">{label}</div>
+ <div className="flex flex-wrap gap-1.5">
+ {currentItems.map((item: string, idx: number) => (
+ <span key={idx} className={`inline-flex items-center gap-1 px-2 py-0.5 ${c.bg} ${c.text} rounded-full text-xs border ${c.border}`}>
+ {item}
+ {editing && (
+ <button onClick={() => removeItem(idx)} className="hover:text-content-primary transition">×</button>
+ )}
+ </span>
+ ))}
+ {editing && (
+ <div className="flex items-center gap-1">
+ <input
+ value={inputVal}
+ onChange={(e) => setInputVal(e.target.value)}
+ onKeyDown={(e) => e.key === 'Enter' && addItem()}
+ placeholder="添加..."
+ className="w-20 bg-surface-elevated border border-line-active rounded px-2 py-0.5 text-xs text-content-primary placeholder-content-disabled focus:outline-none focus:border-accent"
+ />
+ <button onClick={addItem} className="text-xs text-accent hover:text-accent-hover">+</button>
+ </div>
+ )}
+ {!currentItems.length && !editing && (
+ <span className="text-xs text-content-secondary italic">未记录</span>
+ )}
+ </div>
+ </div>
+ );
+}, (prev, next) => {
+ return prev.editing === next.editing &&
+        prev.fieldKey === next.fieldKey &&
+        prev.color === next.color &&
+        prev.items.length === next.items.length &&
+        prev.items.every((v, i) => v === next.items[i]) &&
+        (prev.edits as any)[prev.fieldKey] === (next.edits as any)[next.fieldKey];
+});
+
+
+// 辅助函数：调整 hex 颜色亮度
+function shadeHex(hex: string, percent: number): string {
+ const c = parseInt(hex.replace('#', ''), 16);
+ const r = (c >> 16) & 255;
+ const g = (c >> 8) & 255;
+ const b = c & 255;
+ const factor = 1 + percent / 100;
+ const clamp = (v: number) => Math.min(255, Math.max(0, Math.round(v)));
+ return '#' + [clamp(r * factor), clamp(g * factor), clamp(b * factor)]
+ .map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+// 颜色选择器组件
+function ColorSlider({
+ label, colors, value, onChange,
+}: {
+ label: string;
+ colors: string[];
+ value: string;
+ onChange: (color: string) => void;
+}) {
+ return (
+ <div className="mb-2">
+ <div className="text-xs text-content-muted mb-1.5">{label}</div>
+ <div className="flex gap-1.5 flex-wrap">
+ {colors.map((color) => (
+ <button
+ key={color}
+ onClick={() => onChange(color)}
+ className={`w-6 h-6 rounded-full transition flex items-center justify-center ${
+ value === color ? 'ring-2 ring-accent ring-offset-1 scale-110' : 'hover:scale-105'
+ }`}
+ style={{ backgroundColor: color }}
+ title={color}
+ >
+ {value === color && (
+ <svg className="w-3 h-3 text-white drop-shadow-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
+ <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+ </svg>
+ )}
+ </button>
+ ))}
+ <input
+ type="color"
+ value={value}
+ onChange={(e) => onChange(e.target.value)}
+ className="w-6 h-6 rounded-full border-0 p-0 overflow-hidden cursor-pointer"
+ style={{ background: 'none' }}
+ />
+ </div>
+ </div>
+ );
+}

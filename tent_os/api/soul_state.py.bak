@@ -1,0 +1,1871 @@
+"""Tent OS Soul Intercom — 精简版 API Server
+
+移除了：World API、Skills API、MCP Server、AI社区、社交、物理执行器、IoT、2D庄园
+保留了：对话、任务、健康检查、灵魂层接口、WebSocket、前端静态文件
+"""
+
+import asyncio
+import json
+import os
+import sqlite3
+import uuid
+import hashlib
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional, List, Set
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, File, UploadFile
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel, Field
+import uvicorn
+import yaml
+
+from tent_os.bootstrap import load_config, create_message_bus, create_state_store, create_llm
+from tent_os.logging_config import get_logger
+import random
+import re
+
+# ========== 轻量级追问生成器（零LLM调用）==========
+FOLLOW_UP_TEMPLATES = {
+    "choice": ["你为什么选择这个？", "有没有考虑过其他选项？", "这个选择对你来说意味着什么？"],
+    "emotion": ["你当时是什么感觉？", "那种情绪对你影响大吗？", "后来你是怎么调整过来的？"],
+    "place": ["那个地方对你有什么特殊意义？", "你最喜欢那里的什么？", "还有类似让你印象深刻的地方吗？"],
+    "memory": ["能再多说一些那时候的事吗？", "那件事之后发生了什么？", "你还记得什么细节？"],
+    "person": ["TA 对你影响最大的是什么？", "你们是怎么认识的？", "你们现在还有联系吗？"],
+    "advice": ["你是怎么想到这个的？", "这个想法是从什么时候开始有的？", "有没有人给过你类似的建议？"],
+    "dream": ["你为什么想实现这个？", "你为此做过什么努力？", "实现之后你最想做什么？"],
+    "difficulty": ["那段时间你是怎么挺过来的？", "有没有谁帮助过你？", "现在你回头看有什么感悟？"],
+    "work": ["这份工作/项目中最让你满意的部分是什么？", "过程中遇到过什么挑战吗？", "团队里谁给你的帮助最大？"],
+    "family": ["家里人对这件事怎么看？", "你们平时的相处模式是怎样的？", "这件事对家庭关系有什么影响？"],
+}
+
+FOLLOW_UP_KEYWORDS = {
+    "choice": ["选择", "决定", "选", "抉择", "取舍", "比较", "权衡"],
+    "emotion": ["感觉", "心情", "情绪", "难过", "开心", "高兴", "伤心", "激动", "平静", "焦虑", "害怕", "愤怒", "满足", "失落"],
+    "place": ["地方", "城市", "国家", "学校", "家乡", "北京", "上海", "广州", "深圳", "成都", "杭州", "西安"],
+    "memory": ["以前", "小时候", "记得", "回忆", "那时", "曾经", "过去", "往事", "童年", "青春"],
+    "person": ["朋友", "同事", "家人", "父母", "孩子", "兄弟", "姐妹", "他", "她", "他们", "老师", "领导", "老板"],
+    "advice": ["建议", "应该", "可以", "试试", "推荐", "建议", "方法", "策略", "技巧"],
+    "dream": ["想", "希望", "梦想", "目标", "愿望", "规划", "打算", "期待", "向往"],
+    "difficulty": ["困难", "挑战", "痛苦", "挣扎", "坚持", "挫折", "失败", "压力", "迷茫", "困惑", "不容易"],
+    "work": ["工作", "项目", "公司", "团队", "业务", "客户", "产品", "开发", "设计", "运营", "管理"],
+    "family": ["家里", "父母", "孩子", "妻子", "丈夫", "老婆", "老公", "家人", "家庭", "亲戚"],
+}
+
+FOLLOW_UP_GENERIC = [
+    "能再多说一些吗？",
+    "后来呢？",
+    "你为什么会这么想？",
+    "那对你意味着什么？",
+    "还有没有类似的？",
+]
+
+def generate_follow_ups(ai_response: str, user_message: str = "") -> List[str]:
+    """基于AI回复内容，零LLM生成1-3个自然追问"""
+    if not ai_response or len(ai_response) < 20:
+        return []
+    
+    text = ai_response + " " + user_message
+    matched_categories = set()
+    
+    for category, keywords in FOLLOW_UP_KEYWORDS.items():
+        for kw in keywords:
+            if kw in text:
+                matched_categories.add(category)
+                break
+    
+    questions = []
+    if matched_categories:
+        # 从匹配的类别中随机选2个，每个类别随机选1个问题
+        selected_cats = random.sample(list(matched_categories), min(2, len(matched_categories)))
+        for cat in selected_cats:
+            q = random.choice(FOLLOW_UP_TEMPLATES[cat])
+            if q not in questions:
+                questions.append(q)
+    
+    # 如果没有匹配到，或者问题太少，补充通用追问
+    if len(questions) < 2:
+        generics = [q for q in FOLLOW_UP_GENERIC if q not in questions]
+        while len(questions) < 2 and generics:
+            q = random.choice(generics)
+            generics.remove(q)
+            if q not in questions:
+                questions.append(q)
+    
+    # 最多返回3个
+    return questions[:3]
+from tent_os.soul import (
+    ThoughtExtractor, VoiceModeler, AppearanceModeler,
+    StyleFinetuner, TTSSynthesizer, AuthorizationEngine,
+    PersonaProfiler, PersonaProfile,
+)
+from tent_os.soul.encryption import SoulEncryption
+from tent_os.soul.dependency_guardian import DependencyGuardian
+from tent_os.governance.mode_router import get_mode_router
+from tent_os.tools.definitions import get_tools_by_mode
+
+logger = get_logger()
+
+
+# ========== Pydantic 模型 ==========
+
+class TaskSubmitRequest(BaseModel):
+    task: str = Field(..., description="用户任务描述")
+    tools: list = Field(default=[], description="可用工具列表")
+    user_id: Optional[str] = Field(default=None, description="用户ID")
+    session_id: Optional[str] = Field(default=None, description="会话ID")
+
+
+class FeedbackRequest(BaseModel):
+    type: str = Field(..., description="反馈类型: like / dislike / correct")
+    correction: Optional[str] = Field(default=None, description="纠正内容")
+    message_index: Optional[int] = Field(default=None, description="消息索引")
+
+
+class ApprovalRequest(BaseModel):
+    approved: bool = Field(..., description="是否批准执行")
+
+
+class WillRequest(BaseModel):
+    heirs: list = []
+    topic_whitelist: list = []
+    topic_blacklist: list = []
+    activation_condition: str = "after_death"
+    activation_date: Optional[str] = None
+    farewell_letter: Optional[str] = None
+    access_code: Optional[str] = None
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(..., description="要合成的文本")
+    emotion: Optional[str] = Field(default="neutral", description="情绪标签")
+    voice_key: Optional[str] = Field(default=None, description="声音选择键")
+
+
+# ========== WebSocket 管理器 ==========
+
+class WSConnectionManager:
+    def __init__(self):
+        self.connections: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        async with self._lock:
+            self.connections.add(websocket)
+
+    async def disconnect(self, websocket: WebSocket):
+        async with self._lock:
+            self.connections.discard(websocket)
+
+    async def broadcast(self, message: Dict):
+        async with self._lock:
+            if not self.connections:
+                return
+            connections = list(self.connections)
+        text = json.dumps(message)
+        dead = set()
+        for ws in connections:
+            try:
+                await ws.send_text(text)
+            except Exception:
+                dead.add(ws)
+        if dead:
+            async with self._lock:
+                self.connections -= dead
+
+    async def send_to(self, websocket: WebSocket, message: Dict):
+        try:
+            await websocket.send_text(json.dumps(message))
+        except Exception:
+            async with self._lock:
+                self.connections.discard(websocket)
+
+
+ws_manager = WSConnectionManager()
+
+
+# ========== 快速对话模式（跳过 governance 完整流程）==========
+# 可从环境变量/配置文件加载的快速模式System Prompt
+FAST_CHAT_SYSTEM_PROMPT = os.environ.get(
+    "TENT_FAST_CHAT_PROMPT",
+    "你是 Tent OS，一个陪伴用户的 AI 助手。用自然、温暖的中文回复，适当简洁。"
+)
+
+
+async def _handle_fast_chat(session_id: str, user_id: str, content: str, websocket: WebSocket, capabilities: dict = None, deep_thinking: bool = False):
+    """统一对话 handler：Agent Loop 真流式对话引擎
+
+    Phase 1 重构：
+    - 使用 AgentLoop.run() 进行真流式对话
+    - 整合 ContextAssemblyPipeline（5层压缩 + WorkingMemory + 相关记忆）
+    - 删除硬编码关键词路由、伪流式、[[DELEGATE:...]] 标记
+    - 工具列表从 MCP Gateway + 本地工具动态获取
+    """
+    capabilities = capabilities or {}
+    import time
+    start_ts = time.time()
+
+    # ========== 0. 会话管理 ==========
+    try:
+        if state.state_store:
+            try:
+                s = await state.state_store.load(session_id)
+            except KeyError:
+                await state.state_store.create(
+                    session_id=session_id,
+                    task=content,
+                    user_id=user_id,
+                    title=content[:30] + "..." if len(content) > 30 else content
+                )
+            await state.state_store.append_message(session_id, "user", content)
+    except Exception as e:
+        logger.warning(f"[FastChat] 会话操作失败 [{session_id}]: {e}")
+
+    # ========== 1. 使用新 Agent Loop（如果可用）==========
+    if state.agent_loop and state._llm:
+        try:
+            await _handle_fast_chat_v2(
+                session_id, user_id, content, websocket,
+                capabilities, deep_thinking, start_ts
+            )
+            return
+        except Exception as e:
+            logger.error(f"[FastChat] AgentLoop 失败，回退到旧逻辑: {e}", exc_info=True)
+            # 回退到旧逻辑（保留在函数末尾）
+
+    # ========== 2. 回退逻辑（AgentLoop 未初始化时）==========
+    await _handle_fast_chat_legacy(
+        session_id, user_id, content, websocket,
+        capabilities, deep_thinking, start_ts
+    )
+
+
+async def _handle_fast_chat_v2(
+    session_id: str, user_id: str, content: str, websocket: WebSocket,
+    capabilities: dict, deep_thinking: bool, start_ts: float
+):
+    """Phase 1 重构后的真流式对话处理"""
+    reply = ""
+    reasoning_text = ""
+    conversation_for_cache = None
+
+    # --- 1.1 构建 persona_hint ---
+    persona_hint = ""
+    if state.persona_profiler:
+        try:
+            profile = state.persona_profiler.get_profile(user_id)
+            if profile:
+                persona_hint = _build_persona_hint(profile)
+        except Exception:
+            pass
+
+    # --- 1.2 构建 mode_fragment ---
+    mode_fragment = ""
+    has_tools = bool(capabilities.get("web_search") or capabilities.get("file_ops"))
+    if state.mode_router:
+        try:
+            mode_name = "unified" if has_tools else "chat"
+            mode_fragment = state.mode_router.get_system_prompt_fragment(mode_name)
+        except Exception:
+            pass
+
+    # --- 1.3 更新 WorkingMemory ---
+    working_memory_text = ""
+    if state.working_memory_manager:
+        try:
+            slots = state.working_memory_manager.update(user_query=content)
+            working_memory_text = state.working_memory_manager.get_context_text(max_chars=2000)
+        except Exception as e:
+            logger.debug(f"[FastChat] WorkingMemory 更新失败: {e}")
+
+    # --- 1.4 召回相关记忆（向量语义搜索）---
+    relevant_memories = None
+    if state.embedding_client and state.memory_store:
+        try:
+            query_vector = await state.embedding_client.embed(content)
+            if query_vector:
+                relevant_memories = state.memory_store.search(
+                    query_vector=query_vector,
+                    limit=5,
+                )
+        except Exception as e:
+            logger.debug(f"[FastChat] 记忆召回失败: {e}")
+
+    # --- 1.5 加载对话历史 ---
+    conversation_history = []
+    try:
+        cached_hist = state._session_msg_cache.get(session_id, [])
+        if cached_hist:
+            conversation_history = list(cached_hist)
+        elif state.state_store:
+            hist = await state.state_store.get_messages(session_id, limit=100)
+            conversation_history = [
+                {"role": m.get("role", ""), "content": m.get("content", "")}
+                for m in hist
+                if m.get("role") and m.get("content")
+            ]
+    except Exception:
+        pass
+
+    # --- 1.6 定义流式回调 ---
+    async def _on_chunk(text: str, chunk_type: str = "content"):
+        nonlocal reply, reasoning_text
+        if chunk_type == "reasoning":
+            reasoning_text += text
+            # 前端可能不支持 reasoning_chunk，先不发，或发特殊类型
+            # TODO: 前端支持后启用
+            # await ws_manager.send_to(websocket, {
+            #     "type": "chat.reasoning_chunk",
+            #     "payload": {"content": text, "session_id": session_id},
+            # })
+        else:
+            reply += text
+            try:
+                await ws_manager.send_to(websocket, {
+                    "type": "chat.stream_chunk",
+                    "payload": {"content": text, "session_id": session_id},
+                })
+            except Exception:
+                pass
+
+    async def _on_tool_call(tool_info: Dict):
+        try:
+            await ws_manager.send_to(websocket, {
+                "type": "chat.tool_call",
+                "payload": {
+                    "session_id": session_id,
+                    "tool": tool_info.get("tool", ""),
+                    "arguments": tool_info.get("arguments", {}),
+                },
+            })
+        except Exception:
+            pass
+
+    async def _on_tool_result(result_info: Dict):
+        try:
+            await ws_manager.send_to(websocket, {
+                "type": "chat.tool_result",
+                "payload": {
+                    "session_id": session_id,
+                    "tool": result_info.get("tool", ""),
+                    "result": result_info.get("result", ""),
+                },
+            })
+        except Exception:
+            pass
+
+    # --- 1.7 执行 Agent Loop（真流式）---
+    try:
+        result = await state.agent_loop.run(
+            session_id=session_id,
+            user_id=user_id,
+            user_message=content,
+            websocket=websocket,
+            capabilities=capabilities,
+            deep_thinking=deep_thinking,
+            system_prompt_base=FAST_CHAT_SYSTEM_PROMPT,
+            persona_hint=persona_hint,
+            mode_fragment=mode_fragment,
+            working_memory_text=working_memory_text,
+            relevant_memories=relevant_memories,
+            conversation_history=conversation_history,
+            on_chunk=_on_chunk,
+            on_tool_call=_on_tool_call,
+            on_tool_result=_on_tool_result,
+        )
+        reply = result.get("content", "")
+        reasoning_text = result.get("reasoning", "")
+        conversation_for_cache = result.get("conversation_messages", conversation_history)
+    except Exception as e:
+        logger.error(f"[FastChat] AgentLoop 执行失败 [{session_id}]: {e}", exc_info=True)
+        reply = "抱歉，处理过程中出现了一些问题，请稍后再试。"
+        try:
+            await ws_manager.send_to(websocket, {
+                "type": "chat.stream_chunk",
+                "payload": {"content": reply, "session_id": session_id},
+            })
+        except Exception:
+            pass
+
+    # --- 1.8 发送完成消息 ---
+    elapsed_ms = int((time.time() - start_ts) * 1000)
+    completion_payload = {
+        "content": reply,
+        "session_id": session_id,
+        "follow_up_questions": [],  # Phase 1 删除硬编码追问，后续通过 Skills 实现
+        "capabilities": capabilities,
+        "deep_thinking": deep_thinking,
+        "reasoning": reasoning_text.strip(),
+        "elapsed_ms": elapsed_ms,
+    }
+    try:
+        await ws_manager.send_to(websocket, {
+            "type": "chat.completed",
+            "payload": completion_payload,
+        })
+    except Exception:
+        pass
+
+    # --- 1.9 保存 AI 回复 ---
+    try:
+        if state.state_store:
+            await state.state_store.append_message(session_id, "assistant", reply)
+    except Exception as e:
+        logger.warning(f"[FastChat] 保存AI回复失败 [{session_id}]: {e}")
+
+    # --- 1.10 更新会话消息缓存 ---
+    try:
+        if conversation_for_cache is not None:
+            conversation_for_cache.append({"role": "assistant", "content": reply})
+            non_system = [m for m in conversation_for_cache if m.get("role") != "system"]
+            state._session_msg_cache[session_id] = non_system[-40:]
+    except Exception:
+        pass
+
+    # --- 1.11 后台任务（记忆入库、关系提取等）---
+    _schedule_background_tasks(session_id, user_id, content, reply)
+
+
+async def _handle_fast_chat_legacy(
+    session_id: str, user_id: str, content: str, websocket: WebSocket,
+    capabilities: dict, deep_thinking: bool, start_ts: float
+):
+    """旧版对话处理（AgentLoop 初始化失败时的回退）"""
+    # 保留旧逻辑的核心，但简化
+    has_tools = bool(capabilities.get("web_search") or capabilities.get("file_ops"))
+    reasoning_text = ""
+    reply = ""
+    conversation_for_cache = None
+
+    if not state._llm:
+        reply = "系统正在初始化，请稍后再试。"
+    else:
+        try:
+            # 简化版：直接使用 chat_stream
+            messages = [
+                {"role": "system", "content": FAST_CHAT_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ]
+
+            if hasattr(state._llm, "chat_stream"):
+                reply = await state._llm.chat_stream(
+                    messages=messages,
+                    on_chunk=lambda text, ctype: asyncio.create_task(
+                        ws_manager.send_to(websocket, {
+                            "type": "chat.stream_chunk",
+                            "payload": {"content": text, "session_id": session_id},
+                        })
+                    ) if ctype == "content" else None,
+                    temperature=0.7,
+                    max_tokens=4096,
+                )
+            else:
+                reply = await state._llm.chat(messages, temperature=0.7, max_tokens=4096)
+                await ws_manager.send_to(websocket, {
+                    "type": "chat.stream_chunk",
+                    "payload": {"content": reply, "session_id": session_id},
+                })
+        except Exception as e:
+            logger.warning(f"[FastChat] Legacy 调用失败 [{session_id}]: {e}")
+            reply = "抱歉，我暂时无法回应。请稍后再试。"
+
+    if not reply or not reply.strip():
+        reply = "我在听，请继续说。"
+
+    # 发送完成
+    elapsed_ms = int((time.time() - start_ts) * 1000)
+    try:
+        await ws_manager.send_to(websocket, {
+            "type": "chat.completed",
+            "payload": {
+                "content": reply,
+                "session_id": session_id,
+                "follow_up_questions": [],
+                "capabilities": capabilities,
+                "deep_thinking": deep_thinking,
+                "reasoning": reasoning_text.strip(),
+                "elapsed_ms": elapsed_ms,
+            },
+        })
+    except Exception:
+        pass
+
+    # 保存
+    try:
+        if state.state_store:
+            await state.state_store.append_message(session_id, "assistant", reply)
+    except Exception as e:
+        logger.warning(f"[FastChat] 保存AI回复失败 [{session_id}]: {e}")
+
+    _schedule_background_tasks(session_id, user_id, content, reply)
+
+
+def _build_persona_hint(profile) -> str:
+    """从 PersonaProfile 构建轻量级人格提示"""
+    fragments = []
+    basic_parts = []
+    if getattr(profile, "name", None):
+        basic_parts.append(f"姓名：{profile.name}")
+    if getattr(profile, "age", None):
+        basic_parts.append(f"年龄：{profile.age}")
+    if getattr(profile, "gender", None):
+        basic_parts.append(f"性别：{profile.gender}")
+    if getattr(profile, "occupation", None):
+        basic_parts.append(f"职业：{profile.occupation}")
+    if getattr(profile, "location", None):
+        basic_parts.append(f"现居地：{profile.location}")
+    if getattr(profile, "hometown", None):
+        basic_parts.append(f"故乡：{profile.hometown}")
+    if getattr(profile, "education", None):
+        basic_parts.append(f"教育：{profile.education}")
+    if getattr(profile, "bio", None):
+        basic_parts.append(f"简介：{profile.bio[:100]}")
+    if basic_parts:
+        fragments.append("；".join(basic_parts))
+
+    if getattr(profile, "language_style", None):
+        fragments.append(f"语言风格：{profile.language_style[:120]}")
+
+    try:
+        catchphrases = json.loads(getattr(profile, "catchphrases", "[]") or "[]")
+        if catchphrases:
+            fragments.append(f"常用口头禅：{', '.join(catchphrases[:3])}")
+    except Exception:
+        pass
+
+    try:
+        quirks = json.loads(getattr(profile, "speaking_quirks", "[]") or "[]")
+        if quirks:
+            fragments.append(f"说话习惯：{', '.join(quirks[:2])}")
+    except Exception:
+        pass
+
+    try:
+        imperfections = json.loads(getattr(profile, "imperfections", "[]") or "[]")
+        if imperfections:
+            fragments.append(f"不完美（保留这些特征，不要优化掉）：{', '.join(imperfections[:2])}")
+    except Exception:
+        pass
+
+    if getattr(profile, "relationship_style", None):
+        fragments.append(f"对待关系：{profile.relationship_style[:80]}")
+
+    if fragments:
+        return "\n\n【关于用户的轻量提示】" + "；".join(fragments)
+    return ""
+
+
+def _schedule_background_tasks(session_id: str, user_id: str, content: str, reply: str):
+    """调度后台任务（记忆入库、关系提取、情绪检测等）"""
+    # 记忆入库
+    try:
+        if state.memory_store:
+            conversation_text = f"用户：{content}\n\nAI：{reply}"
+            uri = f"session://{session_id}/turn/{int(time.time())}"
+            asyncio.create_task(
+                state.memory_store.ingest(
+                    content=conversation_text,
+                    uri=uri,
+                    memory_type="conversation",
+                    user_id=user_id,
+                )
+            )
+    except Exception as e:
+        logger.debug(f"[FastChat] 记忆入库失败 [{session_id}]: {e}")
+
+    # 深度关系提取
+    try:
+        if state.relation_extractor and state.cognitive_graph:
+            buf = state._session_context_buffer.setdefault(session_id, [])
+            buf.append(f"用户: {content}\nAI: {reply}")
+            if len(buf) > 5:
+                buf.pop(0)
+            if len(state._session_context_buffer) > 50:
+                oldest = sorted(state._session_context_buffer.keys())[:10]
+                for old_sid in oldest:
+                    del state._session_context_buffer[old_sid]
+
+            aggregated_text = "\n---\n".join(buf)
+            asyncio.create_task(_extract_relations_background(
+                aggregated_text, user_id, session_id
+            ))
+    except Exception as e:
+        logger.debug(f"[FastChat] 关系提取调度失败 [{session_id}]: {e}")
+
+    # 情绪检测（广播改为发送给特定 session）
+    try:
+        if state.emotion_detector:
+            emotion = state.emotion_detector.detect_fast(content)
+            asyncio.create_task(ws_manager.send_to_session(
+                session_id,
+                {
+                    "type": "user.emotion",
+                    "payload": {
+                        "session_id": session_id,
+                        "emotion": emotion.primary,
+                        "intensity": emotion.intensity,
+                        "valence": emotion.valence,
+                        "arousal": emotion.arousal,
+                        "confidence": emotion.confidence,
+                    },
+                }
+            ))
+    except Exception:
+        pass
+        # === Prompt Cache for fast_chat ===
+        # 构建静态段并检查缓存
+        # 如果用户设置了 AI 昵称，替换默认名称
+        base_prompt = FAST_CHAT_SYSTEM_PROMPT
+        ai_name = ""
+        if state.persona_profiler:
+            try:
+                profile = state.persona_profiler.get_profile(user_id)
+                if profile and profile.ai_name:
+                    ai_name = profile.ai_name
+                    base_prompt = base_prompt.replace("Tent OS", ai_name)
+            except Exception:
+                pass
+        static_parts = [base_prompt]
+        persona_hint = ""
+        mode_fragment = ""
+        
+        if state.persona_profiler:
+            try:
+                profile = state.persona_profiler.get_profile(user_id)
+                if profile:
+                    # 构建轻量级人格速写（控制在 300 token 以内）
+                    persona_fragments = []
+                    # 基本信息（优先级最高）
+                    basic_parts = []
+                    if profile.name:
+                        basic_parts.append(f"姓名：{profile.name}")
+                    if profile.age and profile.age > 0:
+                        basic_parts.append(f"年龄：{profile.age}")
+                    if profile.gender:
+                        basic_parts.append(f"性别：{profile.gender}")
+                    if profile.occupation:
+                        basic_parts.append(f"职业：{profile.occupation}")
+                    if profile.location:
+                        basic_parts.append(f"现居地：{profile.location}")
+                    if profile.hometown:
+                        basic_parts.append(f"故乡：{profile.hometown}")
+                    if profile.education:
+                        basic_parts.append(f"教育：{profile.education}")
+                    if profile.bio:
+                        basic_parts.append(f"简介：{profile.bio[:100]}")
+                    if basic_parts:
+                        persona_fragments.append("；".join(basic_parts))
+                    
+                    if profile.language_style:
+                        persona_fragments.append(f"语言风格：{profile.language_style[:120]}")
+                    # 口头禅 / 说话习惯 — 让用户感知到个性化
+                    try:
+                        catchphrases = json.loads(profile.catchphrases or "[]")
+                        if catchphrases:
+                            persona_fragments.append(f"常用口头禅：{', '.join(catchphrases[:3])}")
+                    except Exception:
+                        pass
+                    try:
+                        quirks = json.loads(profile.speaking_quirks or "[]")
+                        if quirks:
+                            persona_fragments.append(f"说话习惯：{', '.join(quirks[:2])}")
+                    except Exception:
+                        pass
+                    # 不完美 — 保留人格真实感（聊天模式也保留）
+                    try:
+                        imperfections = json.loads(profile.imperfections or "[]")
+                        if imperfections:
+                            persona_fragments.append(f"不完美（保留这些特征，不要优化掉）：{', '.join(imperfections[:2])}")
+                    except Exception:
+                        pass
+                    # 关系风格
+                    if profile.relationship_style:
+                        persona_fragments.append(f"对待关系：{profile.relationship_style[:80]}")
+                    
+                    if persona_fragments:
+                        persona_hint = "\n\n【关于用户的轻量提示】" + "；".join(persona_fragments)
+                        static_parts.append(persona_hint)
+            except Exception:
+                pass
+        
+        if state.mode_router:
+            if has_tools:
+                mode_fragment = state.mode_router.get_system_prompt_fragment("unified")
+            else:
+                mode_fragment = state.mode_router.get_system_prompt_fragment("chat")
+            static_parts.append(mode_fragment)
+        
+        # === Agent 团队信息注入 ===
+        agent_team_hint = ""
+        if state.agent_orchestrator and state.agent_manager:
+            try:
+                # 先尝试获取当前用户创建的 Agent
+                agents = state.agent_manager.list_agents(created_by=user_id)
+                # 如果当前用户没有创建过 Agent，回退到所有系统 Agent（预设模板创建的）
+                if not agents:
+                    agents = state.agent_manager.list_agents()
+                if agents:
+                    agent_lines = []
+                    for a in agents:
+                        skills = "、".join([s.name for s in a.skills[:3]])
+                        agent_lines.append(f"- {a.name}（{a.role}）：{skills or '通用助手'}")
+                    agent_team_hint = (
+                        "\n\n【你的Agent团队】\n"
+                        "你拥有一支专业的Agent团队作为后援。团队成员：\n"
+                        + "\n".join(agent_lines)
+                        + "\n\n【调用规则】"
+                        "1. 你始终是一线对话者，直接面对用户\n"
+                        "2. 当用户提出专业领域问题（技术/产品/财务/市场等），或用户明确要求调用团队时，"
+                        "你应该主动在回复末尾添加标记 [[DELEGATE:领域]] 来调用专家\n"
+                        "   - [[DELEGATE:tech]] → 调用技术顾问\n"
+                        "   - [[DELEGATE:product]] → 调用产品经理\n"
+                        "   - [[DELEGATE:finance]] → 调用财务顾问\n"
+                        "   - [[DELEGATE:marketing]] → 调用市场专家\n"
+                        "   - [[DELEGATE:auto]] → 让系统自动选择最合适的Agent\n"
+                        "3. 如果用户直接问你\"你能调用Agent团队吗\"，回答\"可以\"并介绍团队成员\n"
+                        "4. 标记会被系统自动处理并移除，用户看不到\n"
+                        "5. 专家分析返回后，你会收到参考意见，在此基础上给用户最终回复"
+                    )
+                    static_parts.append(agent_team_hint)
+            except Exception:
+                pass
+        
+        # Cache key based on persona + capabilities + agent team content
+        static_content = f"{persona_hint}:{mode_fragment}:{agent_team_hint}:{capabilities}"
+        static_hash = hashlib.md5(static_content.encode("utf-8")).hexdigest()
+        cache_key = f"{user_id}:{hashlib.md5(json.dumps(capabilities, sort_keys=True).encode()).hexdigest()[:8]}"
+        
+        cached = state._fast_chat_prompt_cache.get(cache_key)
+        if cached and cached.get("hash") == static_hash:
+            system_prompt = cached["static_prompt"]
+            cache_hit = True
+        else:
+            system_prompt = "\n\n".join(static_parts)
+            state._fast_chat_prompt_cache[cache_key] = {
+                "hash": static_hash,
+                "static_prompt": system_prompt,
+                "timestamp": datetime.now().isoformat(),
+            }
+            cache_hit = False
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ]
+        
+        # === Agent 团队标记检测与委派 ===
+        # 注：不在此处预判断，让LLM自主在回复中输出 [[DELEGATE:...]] 标记
+        # 标记处理在LLM回复后执行
+        
+        try:
+            # 优先从内存缓存加载完整对话历史（包含 tool_call/tool_result，支持 approval 跨轮次）
+            cached_hist = state._session_msg_cache.get(session_id, [])
+            if cached_hist:
+                messages = [{"role": "system", "content": system_prompt}]
+                messages.extend(cached_hist)
+                messages.append({"role": "user", "content": content})
+            elif state.state_store:
+                try:
+                    # 获取更多消息用于判断是否需要进行分层压缩
+                    hist = await state.state_store.get_messages(session_id, limit=100)
+                    if len(hist) > 1:
+                        messages = [{"role": "system", "content": system_prompt}]
+                        
+                        # 分层记忆：如果消息过多，用 L1 摘要替代早期消息
+                        _hmem = (state.config or {}).get("thresholds", {}).get("hierarchical_memory", {})
+                        COMPRESSION_THRESHOLD = _hmem.get("compression_threshold_messages", 25)
+                        RECENT_KEEP = _hmem.get("recent_keep_messages", 20)
+                        if len(hist) > COMPRESSION_THRESHOLD and state.memory_store:
+                            try:
+                                # 查询该 session 的 L1 摘要
+                                rows = state.memory_store.db.execute(
+                                    "SELECT overview FROM l1_index WHERE uri LIKE ? AND overview IS NOT NULL ORDER BY updated_at DESC LIMIT 3",
+                                    (f"%session://{session_id}%",)
+                                ).fetchall()
+                                if rows:
+                                    summaries = [r["overview"][:400] for r in rows if r["overview"]]
+                                    summary_text = "\n".join(summaries)
+                                    messages.append({
+                                        "role": "system",
+                                        "content": f"【此前对话摘要】\n{summary_text}\n\n以上为之前对话的压缩摘要，细节可能不完整。"
+                                    })
+                                else:
+                                    # 没有 L1 摘要时，用简单的内容概要
+                                    early_msgs = hist[:-RECENT_KEEP]
+                                    early_summary = " | ".join([
+                                        f"{m.get('role', '?')}: {m.get('content', '')[:60]}"
+                                        for m in early_msgs[:5]
+                                    ])
+                                    messages.append({
+                                        "role": "system",
+                                        "content": f"【此前对话概要】{early_summary}..."
+                                    })
+                                # 只追加最近 RECENT_KEEP 条详细消息
+                                for m in hist[-RECENT_KEEP:]:
+                                    r = m.get("role", "")
+                                    c = m.get("content", "")
+                                    if r and c:
+                                        messages.append({"role": r, "content": c})
+                            except Exception:
+                                # 分层加载失败时回退到全部加载
+                                for m in hist:
+                                    r = m.get("role", "")
+                                    c = m.get("content", "")
+                                    if r and c:
+                                        messages.append({"role": r, "content": c})
+                        else:
+                            # 消息不多，直接加载全部
+                            for m in hist:
+                                r = m.get("role", "")
+                                c = m.get("content", "")
+                                if r and c:
+                                    messages.append({"role": r, "content": c})
+                        
+                        # FIX: 确保当前用户消息一定在 messages 中（防御 append_message 延迟/失败）
+                        if not any(m.get("role") == "user" and m.get("content") == content for m in messages):
+                            messages.append({"role": "user", "content": content})
+                except Exception:
+                    pass
+            
+            # === 工具调用 ===
+            if has_tools and state.tool_executor and hasattr(state._llm, 'chat_with_tools'):
+                # 根据 capabilities 过滤可用工具
+                all_tools = get_tools_by_mode("deep")
+                allowed_names = {"memory_search", "memory_get"}  # 记忆工具始终可用
+                if capabilities.get("web_search"):
+                    allowed_names.update({
+                        "web_search", "web_fetch", "browser_navigate", "browser_click",
+                        "browser_type", "browser_read", "browser_screenshot", "http_request"
+                    })
+                if capabilities.get("file_ops"):
+                    allowed_names.update({
+                        "shell", "file_read", "file_write", "directory_list",
+                        "render_ppt", "render_document", "render_contract",
+                        "render_excel", "render_word"
+                    })
+                tools = [t for t in all_tools if t.get("function", {}).get("name") in allowed_names]
+                max_tool_rounds = 5 if deep_thinking else 2
+                tool_round = 0
+                current_messages = list(messages)
+                reply = ""
+                
+                while tool_round < max_tool_rounds:
+                    tool_round += 1
+                    result = await state._llm.chat_with_tools(
+                        current_messages, tools=tools, temperature=0.7, max_tokens=4096
+                    )
+                    tool_calls = result.get("tool_calls", [])
+                    
+                    if not tool_calls:
+                        reply = result.get("content", "") or ""
+                        break
+                    
+                    # 广播工具调用信息给前端
+                    for tc in tool_calls:
+                        try:
+                            await ws_manager.send_to(websocket, {
+                                "type": "chat.tool_call",
+                                "payload": {
+                                    "session_id": session_id,
+                                    "tool": tc["function"]["name"],
+                                    "arguments": tc["function"]["arguments"],
+                                },
+                                "timestamp": asyncio.get_event_loop().time(),
+                            })
+                        except Exception:
+                            pass
+                    
+                    # 将 assistant 的 tool_call 消息追加到对话
+                    # FIX: Kimi K2.6 thinking 模式要求 assistant tool_call 消息包含 reasoning_content
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": result.get("content", "") or "",
+                        "tool_calls": [{"id": tc.get("id", ""), "type": "function", "function": tc["function"]} for tc in tool_calls],
+                    }
+                    # 如果 LLM 返回了 reasoning_content，保留它；否则添加空字符串满足 API 要求
+                    _round_reasoning = result.get("reasoning_content")
+                    if _round_reasoning is not None:
+                        assistant_msg["reasoning_content"] = _round_reasoning
+                        reasoning_text += _round_reasoning + "\n"
+                    else:
+                        assistant_msg["reasoning_content"] = ""
+                    current_messages.append(assistant_msg)
+                    
+                    # 执行每个工具调用
+                    for tc in tool_calls:
+                        tool_name = tc["function"]["name"]
+                        try:
+                            args = json.loads(tc["function"]["arguments"])
+                        except json.JSONDecodeError:
+                            args = {}
+                        tool_result = await state.tool_executor.execute(
+                            tool_name, args, session_id=session_id, max_calls=10
+                        )
+                        current_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": tool_result,
+                        })
+                        
+                        # 广播工具结果摘要给前端
+                        try:
+                            await ws_manager.send_to(websocket, {
+                                "type": "chat.tool_result",
+                                "payload": {
+                                    "session_id": session_id,
+                                    "tool": tool_name,
+                                    "result": tool_result[:800] if len(tool_result) > 800 else tool_result,
+                                },
+                                "timestamp": asyncio.get_event_loop().time(),
+                            })
+                        except Exception:
+                            pass
+                
+                if tool_round >= max_tool_rounds and not reply:
+                    reply = result.get("content", "") or ""
+                # 保存完整对话历史供下轮使用（含 tool_call/tool_result）
+                conversation_for_cache = list(current_messages)
+            else:
+                # 无工具授权或工具执行器未就绪：纯文本对话
+                # FIX: 优先使用 chat_with_tools(tools=[]) 以获取 reasoning_content
+                try:
+                    _plain_result = await state._llm.chat_with_tools(messages, tools=[], temperature=0.7, max_tokens=4096)
+                    reply = _plain_result.get("content", "") or ""
+                    _plain_reasoning = _plain_result.get("reasoning_content")
+                    if _plain_reasoning:
+                        reasoning_text += _plain_reasoning + "\n"
+                except Exception:
+                    # fallback: 部分 provider 不支持 chat_with_tools
+                    reply = await state._llm.chat(messages, temperature=0.7, max_tokens=4096)
+                conversation_for_cache = list(messages)
+            
+            # === Agent 团队标记检测 ===
+            # 检测主Agent回复末尾是否有 [[DELEGATE:领域]] 标记
+            import re
+            delegate_match = re.search(r'\[\[DELEGATE:([^\]]+)\]\]', reply)
+            if delegate_match and state.agent_orchestrator and state.agent_manager:
+                domain = delegate_match.group(1).strip().lower()
+                # 移除标记
+                reply = reply[:delegate_match.start()].strip()
+                
+                logger.warning(f"[FastChat] Agent委派触发 [{session_id}]: domain={domain}, task={content[:40]}")
+                try:
+                    await ws_manager.send_to(websocket, {
+                        "type": "chat.delegating",
+                        "payload": {
+                            "session_id": session_id,
+                            "message": f"正在召唤专家（{domain}）...",
+                            "domains": [domain],
+                        },
+                    })
+                except Exception:
+                    pass
+                
+                try:
+                    # 构建委派意图
+                    intent = {
+                        "action": "delegate_task",
+                        "requires_sub_agent": True,
+                        "agent_count": 1,
+                        "collaboration_mode": "single",
+                        "target_domains": [domain] if domain != "auto" else ["product", "tech", "finance", "marketing"],
+                        "target_agent_name": "",
+                        "task_complexity": 3,
+                        "confidence": 0.9,
+                        "reasoning": f"主Agent自主标记调用: {domain}",
+                    }
+                    delegation_result = await state.agent_orchestrator._delegate_single(
+                        user_id, content, intent, {}, []
+                    )
+                    
+                    if delegation_result and delegation_result.get("type") == "delegated":
+                        agent_content = delegation_result.get("content", "")
+                        agent_name = delegation_result.get("agent_name", "专家")
+                        if agent_content:
+                            logger.warning(f"[FastChat] Agent委派成功 [{session_id}]: agent={agent_name}, content_len={len(agent_content)}")
+                            # 将专家分析作为新消息追加，让主Agent做最终回复
+                            # FIX: 跳过第二次LLM调用，直接将专家内容作为回复。
+                            # 原因：第二次LLM调用需要30-60秒，用户等不及会刷新页面导致回复丢失。
+                            # 专家内容已经是高质量输出，直接呈现给用户更可靠。
+                            reply = f"已调用{agent_name}为你准备以下内容：\n\n{agent_content}"
+                            reasoning_text = f"主Agent自主标记调用: {domain}\n\n{reasoning_text}".strip()
+                            logger.warning(f"[FastChat] Agent委派直接回复 [{session_id}]: {len(reply)} chars")
+                        else:
+                            logger.warning(f"[FastChat] Agent委派返回空内容 [{session_id}]: agent={agent_name}")
+                except Exception as e:
+                    logger.warning(f"[FastChat] Agent标记委派失败 [{session_id}]: {e}")
+                    import traceback
+                    logger.debug(f"[FastChat] Agent委派异常详情: {traceback.format_exc()}")
+                    reply += "\n\n（我在尝试联系团队专家时遇到了一点问题，但以上回复仍然有效。）"
+            
+            if not reply or not reply.strip():
+                reply = "我在听，请继续说。"
+        except Exception as e:
+            import traceback
+            llm_type = type(state._llm).__name__ if state._llm else "None"
+            logger.warning(f"[FastChat] LLM 调用失败 [{session_id}] (llm_type={llm_type}): {e}")
+            logger.debug(f"[FastChat] Traceback: {traceback.format_exc()}")
+            reply = "抱歉，我暂时无法回应。请稍后再试。"
+    else:
+        reply = "系统正在初始化，请稍后再试。"
+    
+    # 保存完整对话历史到内存缓存（含 tool_call/tool_result，供 approval 跨轮次使用）
+    try:
+        if conversation_for_cache is not None:
+            conversation_for_cache.append({"role": "assistant", "content": reply})
+            non_system = [m for m in conversation_for_cache if m.get("role") != "system"]
+            state._session_msg_cache[session_id] = non_system[-40:]  # 限制40条防止内存泄漏
+    except Exception:
+        pass
+    
+    # 模拟流式输出（支持中止）
+    chunk_size = 8
+    sent_len = 0
+    for i in range(0, len(reply), chunk_size):
+        # 检查是否被中止
+        try:
+            if state.state_store:
+                sess = await state.state_store.load(session_id)
+                if sess.get("abort_requested"):
+                    reply = reply[:sent_len]
+                    break
+        except Exception:
+            pass
+        chunk = reply[i:i + chunk_size]
+        sent_len += len(chunk)
+        try:
+            await ws_manager.send_to(websocket, {
+                "type": "chat.stream_chunk",
+                "payload": {"content": chunk, "session_id": session_id},
+                "timestamp": asyncio.get_event_loop().time(),
+            })
+        except Exception:
+            pass
+        await asyncio.sleep(0.02)
+    
+    # 流式结束后清除 abort 标志
+    try:
+        if state.state_store:
+            await state.state_store.update(session_id, {"abort_requested": False})
+    except Exception:
+        pass
+    
+    # 生成追问
+    follow_ups = generate_follow_ups(reply, content)
+    
+    # 构建完成payload
+    completion_payload = {
+        "content": reply,
+        "session_id": session_id,
+        "follow_up_questions": follow_ups,
+        "capabilities": capabilities,
+        "deep_thinking": deep_thinking,
+        "reasoning": reasoning_text.strip(),
+        "elapsed_ms": int((time.time() - start_ts) * 1000),
+    }
+    
+    # 完成
+    try:
+        await ws_manager.send_to(websocket, {
+            "type": "chat.completed",
+            "payload": completion_payload,
+            "timestamp": asyncio.get_event_loop().time(),
+        })
+    except Exception:
+        pass
+    
+    # 保存 AI 回复
+    try:
+        if state.state_store:
+            await state.state_store.append_message(session_id, "assistant", reply)
+            logger.warning(f"[FastChat] 保存AI回复成功 [{session_id}]: {len(reply)} chars")
+    except Exception as e:
+        logger.warning(f"[FastChat] 保存AI回复失败 [{session_id}]: {e}")
+    
+    # === 自动入库记忆 + 智能压缩 + 深度关系提取 ===
+    # 计算当前回合工作量（Token数）
+    try:
+        import tiktoken
+        encoder = tiktoken.get_encoding("cl100k_base")
+        turn_tokens = len(encoder.encode(content)) + len(encoder.encode(reply))
+    except Exception:
+        turn_tokens = len(content) // 2 + len(reply) // 2
+    
+    # 更新压缩追踪器
+    tracker = state._compression_tracker.setdefault(user_id, {
+        "accumulated_tokens": 0,
+        "last_compress_time": 0,
+        "session_tokens": {},
+    })
+    tracker["accumulated_tokens"] += turn_tokens
+    tracker["session_tokens"][session_id] = tracker["session_tokens"].get(session_id, 0) + turn_tokens
+    
+    # 记忆入库（不阻塞）
+    try:
+        if state.memory_store:
+            conversation_text = f"用户：{content}\n\nAI：{reply}"
+            uri = f"session://{session_id}/turn/{int(time.time())}"
+            asyncio.create_task(
+                state.memory_store.ingest(
+                    content=conversation_text,
+                    uri=uri,
+                    memory_type="conversation",
+                    user_id=user_id,
+                )
+            )
+    except Exception as e:
+        logger.debug(f"[FastChat] 记忆入库失败 [{session_id}]: {e}")
+    
+    # 即时单回合摘要：高工作量对话立即生成 L1 摘要，不等定时任务
+    _thresh = (state.config or {}).get("thresholds", {}).get("memory_compression", {})
+    _instant_threshold = _thresh.get("instant_summary_tokens", 800)
+    if turn_tokens > _instant_threshold and state.memory_store and state._llm:
+        try:
+            async def _quick_summarize():
+                # FIX: 不依赖内部方法，直接调用 LLM 生成摘要
+                prompt = f"用简洁的中文总结以下对话的核心要点（200字内）：\n\n{conversation_text[:8000]}\n\n格式：一句话摘要 + 3-5个核心要点"
+                summary = await state._llm.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400, thinking={"type": "disabled"})
+                if summary:
+                    quick_uri = f"l1://quick/{session_id}/{int(time.time())}"
+                    try:
+                        import tiktoken
+                        enc = tiktoken.get_encoding("cl100k_base")
+                        tok_count = len(enc.encode(summary))
+                    except Exception:
+                        tok_count = len(summary) // 2
+                    state.memory_store.db.execute(
+                        "INSERT OR REPLACE INTO l1_index (uri, overview, overview_tokens, updated_at) VALUES (?, ?, ?, datetime('now'))",
+                        (quick_uri, summary.strip(), tok_count)
+                    )
+                    state.memory_store.db.commit()
+                    logger.info(f"[FastChat] 即时单回合摘要已生成 [{session_id}] {turn_tokens} tokens -> L1")
+            asyncio.create_task(_quick_summarize())
+        except Exception as e:
+            logger.debug(f"[FastChat] 即时摘要失败 [{session_id}]: {e}")
+    
+    # 智能压缩触发：基于工作量（Token累积+时间），而非消息数量
+    now = time.time()
+    time_since_last = now - tracker["last_compress_time"]
+    should_compress = False
+    compress_reason = ""
+    _accum_threshold = _thresh.get("accumulation_tokens", 2000)
+    _time_threshold = _thresh.get("time_seconds", 3600)
+    _min_accum = _thresh.get("min_accumulation_for_time", 300)
+    if tracker["accumulated_tokens"] >= _accum_threshold:
+        should_compress = True
+        compress_reason = f"累积Token达阈值 ({tracker['accumulated_tokens']})"
+    elif time_since_last >= _time_threshold and tracker["accumulated_tokens"] >= _min_accum:
+        should_compress = True
+        compress_reason = f"超{_time_threshold//3600}小时未压缩且累积Token ({tracker['accumulated_tokens']})"
+    
+    if should_compress and state.memory_store and state._llm:
+        try:
+            async def _smart_compress():
+                result = await state.memory_store.auto_compress_l0_to_l1(
+                    user_id=user_id, hours=1,  # 只压缩最近1小时的
+                )
+                tracker["accumulated_tokens"] = 0
+                tracker["last_compress_time"] = time.time()
+                logger.info(f"[FastChat] 智能压缩完成 [{user_id}] 原因: {compress_reason} -> {result.get('compressed_count', 0)}条")
+            asyncio.create_task(_smart_compress())
+        except Exception as e:
+            logger.debug(f"[FastChat] 智能压缩失败 [{session_id}]: {e}")
+    
+    # 深度关系提取（聚合最近3个回合，扩大提取范围）
+    try:
+        if state.relation_extractor and state.cognitive_graph:
+            # 更新会话上下文缓冲区（FIX: 限制总大小防止内存泄漏）
+            buf = state._session_context_buffer.setdefault(session_id, [])
+            buf.append(f"用户: {content}\nAI: {reply}")
+            if len(buf) > 5:
+                buf.pop(0)
+            # 清理过期会话缓冲区（保留最近50个活跃会话）
+            if len(state._session_context_buffer) > 50:
+                oldest = sorted(state._session_context_buffer.keys())[:10]
+                for old_sid in oldest:
+                    del state._session_context_buffer[old_sid]
+            
+            # 聚合最近最多3个回合进行联合提取
+            aggregated_text = "\n---\n".join(buf)
+            
+            # 直接走 deep path（跳过 fast path），扩大实体和关系类型
+            try:
+                deep_result = await state.relation_extractor.extract_deep(
+                    text=aggregated_text,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+                entities = deep_result.get("entities", [])
+                relations = deep_result.get("relations", [])
+                if entities or relations:
+                    state.relation_extractor.save_to_graph(
+                        entities=entities,
+                        relations=relations,
+                        user_id=user_id,
+                        session_id=session_id,
+                        source_chunk=aggregated_text[:300],
+                    )
+                    logger.debug(f"[FastChat] 深度关系提取完成 [{session_id}] 实体:{len(entities)} 关系:{len(relations)}")
+            except Exception as e:
+                logger.debug(f"[FastChat] 深度关系提取失败 [{session_id}]: {e}")
+    except Exception as e:
+        logger.debug(f"[FastChat] 关系提取外层失败 [{session_id}]: {e}")
+    
+    # 情绪检测（异步，不阻塞）
+    try:
+        if state.emotion_detector:
+            emotion = state.emotion_detector.detect_fast(content)
+            await ws_manager.broadcast({
+                "type": "user.emotion",
+                "payload": {
+                    "session_id": session_id,
+                    "emotion": emotion.primary,
+                    "intensity": emotion.intensity,
+                    "valence": emotion.valence,
+                    "arousal": emotion.arousal,
+                    "confidence": emotion.confidence,
+                },
+            })
+    except Exception:
+        pass
+
+
+# ========== 全局状态 ==========
+
+class APIServerState:
+    def __init__(self):
+        self.bus = None
+        self.state_store = None
+        self.config = None
+        self.pending_results: Dict[str, asyncio.Future] = {}
+        self._db: Optional[sqlite3.Connection] = None
+        self._results_cache: Dict[str, Dict] = {}
+        self._pending_count: Dict[str, int] = {}
+        self._pending_approvals: Dict[str, Dict] = {}
+        self._last_vision_emotion: Dict[str, str] = {}
+        self._nats_subscriptions = []
+        self._dreaming = None
+        self._llm = None
+        self.governance_worker = None
+        # 死亡事件缓存：user_id -> datetime（内存缓存，避免频繁查库）
+        self._death_events: Dict[str, str] = {}
+        # Eternal mode prompt cache: user_id -> {static_hash, static_prompt, timestamp}
+        self._eternal_prompt_cache: Dict[str, Dict] = {}
+        # Fast chat prompt cache: "user_id:mode" -> {hash, static_prompt}
+        self._fast_chat_prompt_cache: Dict[str, Dict] = {}
+        # 记忆压缩追踪器：user_id -> {accumulated_tokens, last_compress_time, session_tokens}
+        # 基于工作量（Token累积+时间）触发压缩，而非简单消息计数
+        self._compression_tracker: Dict[str, Dict] = {}
+        # 会话上下文缓冲区：session_id -> 最近N个回合的文本（用于聚合关系提取）
+        self._session_context_buffer: Dict[str, List[str]] = {}
+        # 会话消息缓存：保存完整对话历史（含 tool_call/tool_result），供 approval 等跨轮次上下文使用
+        self._session_msg_cache: Dict[str, List[Dict]] = {}
+        self.soul_layer = None
+        self.memory_store = None
+        self.emotion_detector = None
+        self.emotion_service = None
+        self.soul_evolution = None
+        self.cognitive_graph = None
+        self.relation_extractor = None
+        self.tool_executor = None
+        # Multi-Agent System
+        self.agent_manager = None
+        self.agent_runtime_pool = None
+        # Agent Core (Phase 1 refactor)
+        self.context_assembler = None
+        self.agent_loop = None
+        self.working_memory_manager = None
+        self.mcp_gateway = None
+
+    async def setup(self, config: Dict):
+        self.config = config
+        self.bus = create_message_bus(config)
+        await self.bus.connect()
+        self.state_store = create_state_store(config)
+        # 如果已由 TentOS 主进程注入，保留现有 LLM
+        if self._llm is None:
+            try:
+                self._llm = create_llm(config)
+                logger.info(f"LLM 初始化成功 (soul_server)")
+            except Exception as e:
+                logger.warning(f"LLM 初始化失败: {e}")
+        else:
+            logger.info(f"LLM 已由主进程注入，跳过重复初始化")
+
+        # 初始化记忆存储（供前端查询）
+        try:
+            from tent_os.memory.tiered_store import TieredMemoryStore
+            from tent_os.memory.emotion_detector import EmotionDetector
+            from tent_os.llm.embedding import EmbeddingClient
+            storage_path = config.get("memory", {}).get("storage_path", "./tent_memory")
+            self.memory_store = TieredMemoryStore(storage_path, llm=self._llm)
+            self.emotion_detector = EmotionDetector(llm=self._llm)
+            from tent_os.services.emotion_service import EmotionService
+            self.emotion_service = EmotionService()
+            # Embedding client for semantic search in eternal chat
+            openai_api_key = config.get("llm", {}).get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
+            if openai_api_key and (openai_api_key.startswith("${") or openai_api_key.strip() == ""):
+                openai_api_key = None
+            self.embedding_client = EmbeddingClient(
+                openai_api_key=openai_api_key,
+                dim=1536,
+            )
+            logger.info(f"[SOUL] 记忆存储与情绪检测已初始化 (embedding={self.embedding_client.provider_name})")
+        except Exception as e:
+            logger.warning(f"[SOUL] 记忆存储初始化失败: {e}")
+            self.embedding_client = None
+        
+        # 初始化工具执行器（供 intuition/deep 模式直接调用工具）
+        try:
+            from tent_os.scheduler.executors.local import LocalExecutor
+            from tent_os.tools.executor import ToolExecutor
+            local_executor = LocalExecutor()
+            local_config = config.get("local_executor", {})
+            # 调用 initialize 传入完整配置（包含安全开关）
+            init_cfg = {
+                "allow_write": local_config.get("allow_write", True),
+                "workspace_mode": local_config.get("workspace_mode", "unrestricted"),
+                "timeout_seconds": local_config.get("timeout_seconds", 30),
+                "auto_approve": not local_config.get("approval_required", True),
+            }
+            # 如果用户配置了 blocked_patterns，传入；否则使用默认（安全拦截）
+            if "blocked_patterns" in local_config:
+                init_cfg["blocked_patterns"] = local_config["blocked_patterns"]
+            if "allowed_commands" in local_config:
+                init_cfg["allowed_commands"] = local_config["allowed_commands"]
+            await local_executor.initialize(init_cfg)
+            self.tool_executor = ToolExecutor(
+                local_executor=local_executor,
+                memory_store=self.memory_store,
+                embedding_client=getattr(self, "embedding_client", None),
+            )
+            logger.info(f"[Tools] 工具执行器已初始化（安全拦截={len(local_executor.blocked_patterns)}条规则, allow_write={local_executor.allow_write}）")
+            
+            # 初始化 MCP Server 管理器（外部工具调用）
+            try:
+                from tent_os.tools.mcp.manager import MCPServerManager
+                self.mcp_manager = MCPServerManager()
+                self.tool_executor.set_mcp_manager(self.mcp_manager)
+                # 异步连接所有已配置的 Server
+                asyncio.create_task(self.mcp_manager.connect_all())
+                logger.info("[MCP] MCP Server 管理器已初始化")
+            except Exception as mcp_e:
+                logger.warning(f"[MCP] MCP 管理器初始化失败: {mcp_e}")
+                self.mcp_manager = None
+        except Exception as e:
+            logger.warning(f"[Tools] 工具执行器初始化失败: {e}")
+            self.tool_executor = None
+        
+        # ========== 初始化 Agent Core（Phase 1 重构）==========
+        try:
+            from tent_os.agent.context_assembly import ContextAssemblyPipeline
+            from tent_os.agent.loop import AgentLoop
+            from tent_os.memory.working_memory import WorkingMemoryManager
+            from tent_os.memory.predictive_preloader import PredictivePreloader
+
+            # 1. Context Assembly Pipeline
+            self.context_assembler = ContextAssemblyPipeline(
+                llm=self._llm,
+                config=config.get("agent", {}),
+            )
+
+            # 2. Working Memory Manager
+            if self.cognitive_graph:
+                preloader = PredictivePreloader(self.cognitive_graph)
+                self.working_memory_manager = WorkingMemoryManager(
+                    graph=self.cognitive_graph,
+                    preloader=preloader,
+                )
+
+            # 3. MCP Gateway（优先使用 GatewayRegistry，回退到 ServerManager）
+            try:
+                from tent_os.plugins.mcp_gateway import MCPGatewayRegistry
+                self.mcp_gateway = MCPGatewayRegistry(config=config.get("mcp", {}))
+                await self.mcp_gateway.start()
+                logger.info("[MCP] MCP Gateway 已初始化")
+            except Exception as gw_e:
+                logger.debug(f"[MCP] Gateway 初始化失败，使用 ServerManager: {gw_e}")
+                self.mcp_gateway = getattr(self, "mcp_manager", None)
+
+            # 4. Agent Loop
+            self.agent_loop = AgentLoop(
+                llm=self._llm,
+                context_assembler=self.context_assembler,
+                tool_executor=self.tool_executor,
+                mcp_gateway=self.mcp_gateway,
+                state_store=self.state_store,
+                config=config.get("agent", {}),
+            )
+            logger.info("[AGENT] Agent Core 已初始化")
+        except Exception as e:
+            logger.warning(f"[AGENT] Agent Core 初始化失败: {e}")
+            self.agent_loop = None
+        
+        # 初始化人格演化引擎
+        try:
+            from tent_os.persona.soul_evolution import SoulEvolution
+            soul_storage = config.get("soul", {}).get("storage_path", "./tent_memory/soul")
+            self.soul_evolution = SoulEvolution(f"{soul_storage}/soul.json", llm=self._llm)
+            logger.info("[SOUL] 人格演化引擎已初始化")
+        except Exception as e:
+            logger.warning(f"[SOUL] 人格演化引擎初始化失败: {e}")
+        
+        # 初始化认知图谱 + 关系提取器
+        try:
+            from tent_os.memory.graph import CognitiveGraph
+            from tent_os.soul.relation_extractor import RelationExtractor
+            graph_db = config.get("memory", {}).get("graph_db", "./tent_memory/graph.db")
+            self.cognitive_graph = CognitiveGraph(graph_db)
+            self.relation_extractor = RelationExtractor(
+                graph=self.cognitive_graph,
+                llm=self._llm,
+            )
+            logger.info("[SOUL] 认知图谱与关系提取器已初始化")
+        except Exception as e:
+            logger.warning(f"[SOUL] 认知图谱初始化失败: {e}")
+        
+        # 初始化 Multi-Agent System
+        try:
+            from tent_os.soul.agent_manager import AgentManager
+            from tent_os.soul.agent_runtime import AgentRuntimePool
+            from tent_os.soul.agent_orchestrator import AgentOrchestrator
+            from tent_os.soul.skills.manager import AgentSkillManager
+            agent_storage = config.get("agent", {}).get("storage_path", "./tent_memory/agents")
+            self.agent_manager = AgentManager(storage_path=agent_storage)
+            self.agent_runtime_pool = AgentRuntimePool()
+            self.agent_runtime_pool.set_dependencies(llm=self._llm, tool_executor=self.tool_executor)
+            # 初始化技能树管理器（P4: Agent成长系统）
+            self.skill_manager = AgentSkillManager(f"{agent_storage}/agent_skills.db")
+            self.agent_orchestrator = AgentOrchestrator(
+                llm=self._llm,
+                agent_manager=self.agent_manager,
+                runtime_pool=self.agent_runtime_pool,
+                skill_manager=self.skill_manager,
+                config=config,
+            )
+            # 为已有Agent初始化技能树
+            try:
+                for agent in self.agent_manager.list_agents():
+                    existing = self.skill_manager.get_agent_skills(agent.id)
+                    if not existing:
+                        self.skill_manager.init_agent_skills(agent.id, agent.role)
+                logger.info(f"[MAS] Agent 技能树已初始化")
+            except Exception as skill_e:
+                logger.debug(f"[MAS] Agent技能树初始化（部分）: {skill_e}")
+            logger.info(f"[MAS] Agent 管理系统已初始化 ({agent_storage})")
+        except Exception as e:
+            logger.warning(f"[MAS] Agent 管理系统初始化失败: {e}")
+        
+        # 初始化人格画像引擎
+        try:
+            soul_storage = config.get("soul", {}).get("storage_path", "./tent_memory/soul")
+            self.persona_profiler = PersonaProfiler(llm=self._llm, storage_path=soul_storage)
+            logger.info("[SOUL] 人格画像引擎已初始化")
+        except Exception as e:
+            logger.warning(f"[SOUL] 人格画像引擎初始化失败: {e}")
+            self.persona_profiler = None
+        
+        # 初始化外部语料导入管道
+        try:
+            from tent_os.soul.ingestion.pipeline import ExternalIngestionPipeline
+            self.ingestion_pipeline = ExternalIngestionPipeline(
+                memory_store=self.memory_store,
+                persona_profiler=self.persona_profiler,
+                embedding_client=self.embedding_client,
+                llm=self._llm,
+            )
+            logger.info("[Ingestion] 外部语料导入管道已初始化")
+        except Exception as e:
+            logger.warning(f"[Ingestion] 导入管道初始化失败: {e}")
+            self.ingestion_pipeline = None
+        
+        # 初始化声音克隆路由器
+        try:
+            from tent_os.soul.cloning.voice_clone_engine import VoiceCloneRouter
+            self.voice_clone_router = VoiceCloneRouter()
+            logger.info("[VoiceClone] 声音克隆路由器已初始化")
+        except Exception as e:
+            logger.warning(f"[VoiceClone] 初始化失败: {e}")
+            self.voice_clone_router = None
+        
+        # 初始化授权引擎（遗嘱管理）
+        try:
+            soul_storage = config.get("soul", {}).get("storage_path", "./tent_memory/soul")
+            self.authorization = AuthorizationEngine(storage_path=soul_storage)
+            logger.info("[SOUL] 授权引擎已初始化")
+        except Exception as e:
+            logger.warning(f"[SOUL] 授权引擎初始化失败: {e}")
+            self.authorization = None
+        
+        # === 初始化灵魂积累层（兼容独立启动模式）===
+        # 大量前端路由依赖 soul_layer，必须在独立启动模式下也初始化
+        try:
+            soul_storage = config.get("soul", {}).get("storage_path", "./tent_memory/soul")
+            self.soul_layer = {
+                "thought_extractor": ThoughtExtractor(soul_storage),
+                "voice_modeler": VoiceModeler(soul_storage),
+                "appearance_modeler": AppearanceModeler(soul_storage),
+                "style_finetuner": StyleFinetuner(soul_storage),
+                "tts_synthesizer": TTSSynthesizer(soul_storage),
+                "authorization": self.authorization or AuthorizationEngine(soul_storage),
+                "encryption": SoulEncryption(config.get("soul", {}).get("password")),
+                "persona_profiler": self.persona_profiler or PersonaProfiler(llm=self._llm, storage_path=soul_storage),
+            }
+            logger.info("[SOUL] 灵魂积累层已初始化（独立启动模式兼容）")
+        except Exception as e:
+            logger.warning(f"[SOUL] 灵魂积累层初始化失败: {e}")
+            self.soul_layer = None
+        
+        # 初始化模式路由器（P1: 直觉模式）
+        try:
+            self.mode_router = get_mode_router()
+            logger.info("[ModeRouter] 模式路由器已初始化（支持 chat/intuition/deep 三种模式）")
+        except Exception as e:
+            logger.warning(f"[ModeRouter] 初始化失败: {e}")
+            self.mode_router = None
+        
+        # 初始化 ASR 服务
+        try:
+            from tent_os.soul.asr_service import ASRService
+            asr_config = config.get("asr", {})
+            # 从环境变量或 LLM 配置中继承 API key
+            if not asr_config.get("api_key"):
+                asr_config["api_key"] = config.get("llm", {}).get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
+            self.asr_service = ASRService(asr_config)
+            logger.info(f"[ASR] 服务已初始化: provider={self.asr_service.provider}, available={self.asr_service.is_available()}")
+        except Exception as e:
+            logger.warning(f"[ASR] 初始化失败: {e}")
+            self.asr_service = None
+        
+        # 初始化情感依赖守护引擎（P4: 安全层）
+        try:
+            self.dependency_guardian = DependencyGuardian(soul_storage)
+            logger.info("[Guardian] 情感依赖守护引擎已初始化")
+        except Exception as e:
+            logger.warning(f"[Guardian] 初始化失败: {e}")
+            self.dependency_guardian = None
+
+        db_path = config.get("scheduler", {}).get("db_path", "./tent_scheduler.db")
+        self._db = sqlite3.connect(db_path, check_same_thread=False)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS approval_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                plan_summary TEXT,
+                approved INTEGER,
+                approved_by TEXT DEFAULT 'web_user',
+                created_at TEXT DEFAULT (datetime('now')),
+                decided_at TEXT
+            )
+        """)
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT DEFAULT 'web_user',
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'pending',
+                priority TEXT DEFAULT 'medium',
+                due_at TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                completed_at TEXT
+            )
+        """)
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS message_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_index INTEGER,
+                feedback_type TEXT NOT NULL,
+                correction TEXT,
+                user_id TEXT DEFAULT 'web_user',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        self._db.commit()
+
+        sub1 = await self.bus.nats.subscribe("governance.response.*", cb=self._on_governance_response)
+        self._nats_subscriptions.append(sub1)
+        sub_stream = await self.bus.nats.subscribe("governance.stream.*", cb=self._on_stream_chunk)
+        self._nats_subscriptions.append(sub_stream)
+        sub_reasoning = await self.bus.nats.subscribe("governance.stream.reasoning.*", cb=self._on_reasoning_chunk)
+        self._nats_subscriptions.append(sub_reasoning)
+        sub_monologue = await self.bus.nats.subscribe("governance.stream.monologue.*", cb=self._on_monologue_chunk)
+        self._nats_subscriptions.append(sub_monologue)
+        sub2 = await self.bus.nats.subscribe("governance.plan_update.*", cb=self._on_plan_update)
+        self._nats_subscriptions.append(sub2)
+        sub3 = await self.bus.nats.subscribe("scheduler.step_update.*", cb=self._on_step_update)
+        self._nats_subscriptions.append(sub3)
+        sub_approval = await self.bus.nats.subscribe("governance.approval.request", cb=self._on_approval_request)
+        self._nats_subscriptions.append(sub_approval)
+        sub_emotion = await self.bus.nats.subscribe("emotion.broadcast", cb=self._on_emotion_broadcast)
+        self._nats_subscriptions.append(sub_emotion)
+        sub_fused = await self.bus.nats.subscribe("emotion.fused", cb=self._on_emotion_fused)
+        self._nats_subscriptions.append(sub_fused)
+        sub_sys_health = await self.bus.nats.subscribe("system.health_alert", cb=self._on_system_health_alert)
+        self._nats_subscriptions.append(sub_sys_health)
+
+        logger.info("API Server 已连接消息总线 —— Tent OS 灵魂对讲机模式")
+        
+        # === 启动记忆压缩后台任务 ===
+        self._start_memory_compression_task()
+
+    def _start_memory_compression_task(self):
+        """启动后台定时记忆压缩任务（L0→L1）"""
+        async def _compress_loop():
+            while True:
+                try:
+                    await asyncio.sleep(1800)  # 每30分钟运行一次
+                    if self.memory_store and self._llm:
+                        logger.info("[MemoryCompression] 启动定时 L0→L1 压缩...")
+                        result = await self.memory_store.auto_compress_l0_to_l1(
+                            user_id=None,  # 处理所有用户
+                            hours=24,
+                        )
+                        logger.info(
+                            f"[MemoryCompression] 完成: {result.get('compressed_count', 0)} 条记录 → "
+                            f"{len(result.get('generated_uris', []))} 个 L1 摘要"
+                        )
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning(f"[MemoryCompression] 压缩任务出错: {e}")
+        
+        self._compression_task = asyncio.create_task(_compress_loop())
+        logger.info("[MemoryCompression] 后台定时压缩任务已启动（每30分钟）")
+
+    async def cleanup(self):
+        if hasattr(self, '_compression_task') and self._compression_task:
+            self._compression_task.cancel()
+            try:
+                await self._compression_task
+            except asyncio.CancelledError:
+                pass
+        # 断开所有 MCP Server
+        if hasattr(self, 'mcp_manager') and self.mcp_manager:
+            try:
+                await self.mcp_manager.disconnect_all()
+                logger.info("[MCP] 所有 Server 已断开")
+            except Exception:
+                pass
+        for sub in self._nats_subscriptions:
+            await sub.unsubscribe()
+        if self.bus:
+            await self.bus.close()
+        if self._db:
+            self._db.close()
+        logger.info("API Server 已断开消息总线")
+
+    # ========== 死亡事件管理 ==========
+    
+    def set_death_event(self, user_id: str, death_time: Optional[datetime] = None) -> bool:
+        """标记用户死亡事件"""
+        if not self.persona_profiler:
+            return False
+        try:
+            self.persona_profiler.set_death_event(user_id, death_time)
+            self._death_events[user_id] = (death_time or datetime.now()).isoformat()
+            return True
+        except Exception as e:
+            logger.error(f"[DeathEvent] 标记失败 [{user_id}]: {e}")
+            return False
+    
+    def clear_death_event(self, user_id: str) -> bool:
+        """清除死亡事件标记"""
+        if not self.persona_profiler:
+            return False
+        try:
+            self.persona_profiler.clear_death_event(user_id)
+            self._death_events.pop(user_id, None)
+            return True
+        except Exception as e:
+            logger.error(f"[DeathEvent] 清除失败 [{user_id}]: {e}")
+            return False
+    
+    def get_death_event(self, user_id: str) -> Optional[str]:
+        """获取用户死亡事件时间"""
+        # 先查内存缓存
+        if user_id in self._death_events:
+            return self._death_events[user_id]
+        
+        # 再查数据库
+        if self.persona_profiler:
+            profile = self.persona_profiler.get_profile(user_id)
+            if profile and profile.death_event:
+                self._death_events[user_id] = profile.death_event
+                return profile.death_event
+        
+        return None
+    
+    def is_post_mortem(self, user_id: str, timestamp: Optional[datetime] = None) -> bool:
+        """检查给定时间是否在死亡事件之后"""
+        death_event = self.get_death_event(user_id)
+        if not death_event:
+            return False
+        
+        try:
+            death_time = datetime.fromisoformat(death_event)
+        except (ValueError, TypeError):
+            return False
+        
+        check_time = timestamp or datetime.now()
+        return check_time > death_time
+
+    async def _on_governance_response(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            session_id = data.get("session_id")
+            msg_type = data.get("type", "")
+            error = data.get("error")
+            if msg_type == "chat.completed":
+                result = data.get("content", "")
+            else:
+                result = data.get("result")
+            if session_id:
+                self._pending_count[session_id] = self._pending_count.get(session_id, 0) - 1
+                if self._pending_count.get(session_id, 0) <= 0:
+                    task_id = f"chat_{uuid.uuid4().hex[:16]}"
+                    self._results_cache[session_id] = {"status": "completed", "result": result, "task_id": task_id, "created_at": datetime.now().isoformat()}
+                if session_id in self.pending_results and not self.pending_results[session_id].done():
+                    self.pending_results[session_id].set_result(result)
+                if msg_type == "chat.completed":
+                    ws_type = "chat.completed"
+                    ai_content = data.get("content", "")
+                    payload = {
+                        "session_id": session_id,
+                        "content": ai_content,
+                        "reasoning": data.get("reasoning", ""),
+                        "source": data.get("source", ""),
+                        "follow_up_questions": generate_follow_ups(ai_content),
+                    }
+                else:
+                    ws_type = "task.failed" if error else "task.completed"
+                    payload = {"session_id": session_id, "result": result if not error else None, "error": error}
+                await ws_manager.broadcast({"type": ws_type, "payload": payload, "timestamp": asyncio.get_event_loop().time()})
+        except Exception as e:
+            logger.warning(f"处理治理响应出错: {e}")
+
+    async def _on_plan_update(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            await ws_manager.broadcast({"type": "task.plan", "payload": data, "timestamp": asyncio.get_event_loop().time()})
+        except Exception:
+            pass
+
+    async def _on_step_update(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            await ws_manager.broadcast({"type": "task.step", "payload": data, "timestamp": asyncio.get_event_loop().time()})
+        except Exception:
+            pass
+
+    async def _on_approval_request(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            session_id = data.get("session_id")
+            if session_id:
+                self._pending_approvals[session_id] = data
+                try:
+                    plan = data.get("plan", {})
+                    summary = plan.get("summary") or plan.get("task") or json.dumps(plan, ensure_ascii=False)[:200]
+                    self._db.execute(
+                        "INSERT INTO approval_history (session_id, plan_summary, approved) VALUES (?, ?, ?)",
+                        (session_id, summary, None)
+                    )
+                    self._db.commit()
+                except Exception:
+                    pass
+                await ws_manager.broadcast({
+                    "type": "approval.request",
+                    "payload": {"session_id": session_id, "plan": data.get("plan", {})},
+                    "timestamp": asyncio.get_event_loop().time(),
+                })
+        except Exception as e:
+            logger.warning(f"处理审批请求出错: {e}")
+
+    async def _on_emotion_broadcast(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            user_id = data.get("user_id", "web_user")
+            await ws_manager.broadcast({
+                "type": "ai.emotion",
+                "payload": {"user_id": user_id, "emotion": data.get("emotion", "listening"), "source": data.get("source", "broadcast")},
+                "timestamp": asyncio.get_event_loop().time(),
+            })
+        except Exception:
+            pass
+
+    async def _on_emotion_fused(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            await ws_manager.broadcast({
+                "type": "emotion.fused",
+                "payload": {
+                    "user_id": data.get("user_id", "web_user"),
+                    "session_id": data.get("session_id"),
+                    "primary": data.get("primary"),
+                    "intensity": data.get("intensity"),
+                },
+                "timestamp": asyncio.get_event_loop().time(),
+            })
+        except Exception:
+            pass
+
+    async def _on_stream_chunk(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            await ws_manager.broadcast({"type": "chat.stream_chunk", "payload": data, "timestamp": asyncio.get_event_loop().time()})
+        except Exception:
+            pass
+
+    async def _on_reasoning_chunk(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            await ws_manager.broadcast({"type": "chat.stream_reasoning", "payload": data, "timestamp": asyncio.get_event_loop().time()})
+        except Exception:
+            pass
+
+    async def _on_monologue_chunk(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            await ws_manager.broadcast({"type": "ai.monologue", "payload": data, "timestamp": asyncio.get_event_loop().time()})
+        except Exception:
+            pass
+
+    async def _on_system_health_alert(self, msg):
+        try:
+            data = json.loads(msg.data.decode() if isinstance(msg.data, bytes) else msg.data)
+            await ws_manager.broadcast({
+                "type": "system.health_alert",
+                "payload": {"alert_type": data.get("alert_type"), "severity": data.get("severity", "warning"), "message": data.get("message")},
+                "timestamp": asyncio.get_event_loop().time(),
+            })
+        except Exception:
+            pass
+
+    async def _query_tasks_by_session(self, session_id: str) -> List[sqlite3.Row]:
+        if not self._db:
+            return []
+        def _exec():
+            cursor = self._db.execute("SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC", (session_id,))
+            return cursor.fetchall()
+        return await asyncio.to_thread(_exec)
+
+    async def _query_all_tasks(self, limit: int = 50) -> List[sqlite3.Row]:
+        if not self._db:
+            return []
+        def _exec():
+            cursor = self._db.execute(
+                "SELECT DISTINCT session_id, status, action as task, created_at, updated_at FROM tasks WHERE session_id IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            return cursor.fetchall()
+        return await asyncio.to_thread(_exec)
+
+
+state = APIServerState()
