@@ -900,7 +900,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 msg_type = msg.get("type")
                 payload = msg.get("payload", {})
 
-                if msg_type == "chat.message":
+                if msg_type == "ping":
+                    await ws_manager.send_to(websocket, {
+                        "type": "pong",
+                        "payload": {},
+                        "timestamp": asyncio.get_event_loop().time(),
+                    })
+
+                elif msg_type == "chat.message":
                     session_id = payload.get("session_id", f"ws_{uuid.uuid4().hex[:12]}")
                     content = payload.get("content", "")
                     images = payload.get("images", [])

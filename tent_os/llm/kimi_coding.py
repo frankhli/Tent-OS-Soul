@@ -309,6 +309,11 @@ class KimiCodingLLM(LLMProvider):
                         on_chunk(content, "content")
                 except (json.JSONDecodeError, IndexError):
                     continue
+            # FIX: 流式结束时如果 content 为空但 reasoning 有内容，尝试提取兜底回复
+            if not full_text and reasoning_text:
+                full_text = self._extract_reply_from_reasoning(reasoning_text)
+                if full_text:
+                    on_chunk(full_text, "content")
         return full_text
 
     async def chat_with_tools(
@@ -445,6 +450,13 @@ class KimiCodingLLM(LLMProvider):
                     if content:
                         full_text += content
                         on_chunk(content, "content")
+                    
+                    # FIX: 如果 content 一直为空但 reasoning 有内容，实时推送兜底内容
+                    if not full_text and reasoning_text and len(reasoning_text) > 50:
+                        extracted = self._extract_reply_from_reasoning(reasoning_text)
+                        if extracted:
+                            full_text = extracted
+                            on_chunk(extracted, "content")
                     
                     # tool_calls —— 增量收集
                     delta_tool_calls = delta.get("tool_calls", [])

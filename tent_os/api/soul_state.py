@@ -415,6 +415,9 @@ async def _handle_fast_chat_v2(
 
     # --- 1.8 发送完成消息 ---
     elapsed_ms = int((time.time() - start_ts) * 1000)
+    # FIX: 空回复兜底，避免前端收到空消息
+    if not reply or not reply.strip():
+        reply = "抱歉，我暂时没有想好怎么回答，请再说一遍好吗？"
     completion_payload = {
         "content": reply,
         "session_id": session_id,
